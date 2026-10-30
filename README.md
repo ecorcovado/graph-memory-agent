@@ -1,85 +1,86 @@
-# GraphMemory-Agent 🧠🕸️
+# graph-memory-agent
 
-> **Autonomous Graph-Augmented Agentic Memory for Local LLMs within a Strict 4K Context Window.**  
-> *Inspired by Alibaba & CUHK's research paper: "GraphReader: Building Graph-based Agent to Enhance Long-Context Abilities of Large Language Models" (arXiv:2406.14550).*
+A lightweight Python tool that lets small, local LLMs (like Qwen 2.5 Coder 7B on Ollama) navigate complex, multi-hop documents without blowing past a 4k token window.
 
----
-
-## 🚀 Overview
-
-Standard Vector RAG (embedding similarity) often fails when answering **multi-hop questions** because semantic similarity cannot traverse logical links across distinct document segments. Conversely, feeding hundreds of thousands of tokens into 128k context windows leads to severe **"lost-in-the-middle" attention degradation** and prohibitive inference costs.
-
-**GraphMemory-Agent** implements an autonomous, coarse-to-fine graph exploration engine that allows lightweight local models (e.g. `Qwen 2.5 Coder 7B`, `Llama 3.2 3B`) running on **Ollama** to solve complex multi-hop queries across long texts while staying strictly within a **4k context window**.
+Built from the core concepts in the *GraphReader* paper ([arXiv:2406.14550](https://arxiv.org/abs/2406.14550)), with a specific focus on **local cybersecurity incident analysis and threat hunting**.
 
 ---
 
-## 🏗️ Architecture
+## Why this exists
+
+### 1. Vector RAG fails at multi-hop links
+Vector search (cosine similarity on text embeddings) works when the answer is in one chunk. It breaks down when answering multi-stage questions like:
+> *"What persistence registry key was dropped by the threat group behind the C2 beacon detected on WKSTN-809?"*
+
+The endpoint alert on `WKSTN-809` mentions an IP, the threat intel report links that IP to an APT group, and the group profile mentions the registry key. An embedding search for "registry key on WKSTN-809" will not find the connection.
+
+### 2. Massive context windows degrade and cost money
+Dumping 50,000 lines of SIEM logs into a 128k context window triggers "lost-in-the-middle" attention degradation. More importantly, in security operations (SOC/DFIR), you cannot leak client network logs, internal IPs, or credential paths to third-party cloud APIs.
+
+This project runs **100% locally** via Ollama. It extracts an entity co-occurrence graph and uses an autonomous agent loop that hops from entity to entity, logging intermediate clues into a scratchpad memory until it has enough evidence to answer.
+
+---
+
+## How it works
 
 ```
-                 [ Long Document / Incident Logs ]
-                                 │
-                                 ▼
-                    [ 1. Graph Construction ]
-                - Text Chunking (Paragraph-aware)
-                - Atomic Fact Extraction (LLM)
-                - Entity / Key Element Normalization
-                                 │
-                                 ▼
-                    [ 2. Knowledge Graph (G) ]
-                 - Nodes: Entities / Key Concepts
-                 - Edges: Co-occurrence in Atomic Facts
-                                 │
-                                 ▼
-                     [ 3. Autonomous Agent ]
-           ┌───────────────────────────────────────────┐
-           │ • Rational Plan Decomposition             │
-           │ • Initial Node Selection                  │
-           │ • Coarse-to-Fine Fact Inspection          │
-           │ • Hop-to-Neighbor or Read-Chunk           │
-           │ • Dynamic Notebook Scratchpad             │
-           └───────────────────────────────────────────┘
-                                 │
-                                 ▼
-                     [ 4. Answer Synthesis ]
+ Raw Document / Incident Log
+            │
+            ▼
+ 1. Atomic Fact Extraction
+    - Chunks text
+    - Prompts local LLM for standalone atomic facts + key entities
+            │
+            ▼
+ 2. NetworkX Knowledge Graph
+    - Nodes: Hostnames, Users, IPs, Threat Actors, Hashes, Labs
+    - Edges: Shared occurrence across atomic facts
+            │
+            ▼
+ 3. Autonomous Traversal Loop (4k Context Budget)
+    ┌────────────────────────────────────────────────────────┐
+    │ a. Formulate a rational step-by-step plan              │
+    │ b. Pick the best entry-point node                       │
+    │ c. Inspect atomic facts at current node                 │
+    │ d. Record discovered clues into the Notebook            │
+    │ e. Decide next action: HOP to neighbor OR TERMINATE     │
+    └────────────────────────────────────────────────────────┘
+            │
+            ▼
+ 4. Direct Answer Synthesis from Notebook Evidence
 ```
 
 ---
 
-## ✨ Key Features
-
-* **100% Local & Privacy-Preserving:** Runs entirely on local Ollama endpoints (`localhost:11434`). Zero cloud data leakage, zero API subscription costs.
-* **4K Context Strictness:** The agent never ingests raw full documents. It navigates local subgraphs and records fine-grained evidence in a compact notebook.
-* **Multi-Hop Traversal:** Capable of resolving 3-hop to 5-hop relationship queries that conventional cosine vector search completely misses.
-* **Zero Heavy Dependencies:** Engineered cleanly with Python standard libraries (`urllib`, `json`, `dataclasses`) and `networkx`.
-
----
-
-## ⚡ Quickstart
+## Quickstart
 
 ### Prerequisites
-1. Ensure Python 3.10+ is installed.
-2. Install [Ollama](https://ollama.com) and pull your preferred local model:
+1. Python 3.10+
+2. [Ollama](https://ollama.com) installed and running locally:
    ```bash
    ollama pull qwen2.5-coder:7b
    ```
 
-### Run the Demo
+### Setup & Run
 ```bash
-git clone https://github.com/ecorcovado/graph-memory-agent.git
+git clone https://github.com/<your-username>/graph-memory-agent.git
 cd graph-memory-agent
 
-# Run the 3-hop multi-hop reasoning demo
+# Install dependencies (only networkx required)
+pip install networkx
+
+# Run the multi-hop test
 python run_agent.py --model qwen2.5-coder:7b
 
-# Run unit tests offline
+# Run offline unit tests
 python -m unittest tests/test_components.py
 ```
 
 ---
 
-## 🔬 Live Reasoning Trajectory Example
+## Example Trajectory
 
-Below is an actual execution trace on a 3-hop reasoning benchmark using `qwen2.5-coder:7b`:
+Tested locally on `qwen2.5-coder:7b` (4K context constraint):
 
 ```text
 Target Question:
@@ -93,17 +94,17 @@ Target: 'project aegis'
 
 [STEP 1: NOTEBOOK UPDATED]
 Node: 'project aegis'
-Discovered Fact: Marcus Thorne is the lead engineer who architected the ingestion engine for Project Aegis.
+Discovered: Marcus Thorne is the lead engineer who architected the ingestion engine for Project Aegis.
 Action: ACTION: HOP | marcus thorne
 
 [STEP 2: NOTEBOOK UPDATED]
 Node: 'marcus thorne'
-Discovered Fact: Marcus Thorne previously led the threat research division at Sentinel Core Labs based in Melbourne.
+Discovered: Marcus Thorne previously led the threat research division at Sentinel Core Labs based in Melbourne.
 Action: ACTION: HOP | sentinel core labs
 
 [STEP 3: NOTEBOOK UPDATED]
 Node: 'sentinel core labs'
-Discovered Fact: Sentinel Core Labs was founded in 2018 inside the historic Old Treasury Building in Melbourne, Victoria.
+Discovered: Sentinel Core Labs was founded in 2018 inside the historic Old Treasury Building in Melbourne, Victoria.
 Action: ACTION: HOP | old treasury building
 
 [FINAL ANSWER]
@@ -112,13 +113,19 @@ Action: ACTION: HOP | old treasury building
 
 ---
 
-## 📊 Research Lineage & Benchmark Context
+## Project Structure
 
-Based on the findings in *GraphReader (Li et al., 2024)*:
-* **LV-Eval & LongBench:** An agent equipped with a 4k context window exploring an atomic fact graph outperformed GPT-4-128k across context lengths from 16k to 256k tokens.
-* **Mitigating "Lost in the Middle":** By decomposing text into atomic facts $A_i$ and maintaining an active notebook scratchpad, factual recall remained above 60% even at 256k token distances.
+```
+graph-memory-agent/
+├── core/
+│   ├── graph_builder.py   # Ollama client, fact extractor, and NetworkX builder
+│   ├── notebook.py        # Append-only structured scratchpad memory
+│   └── agent.py           # Rational planner, node explorer, and traversal logic
+├── tests/
+│   └── test_components.py # Offline deterministic unit tests
+├── run_agent.py           # CLI entry point
+└── README.md
+```
 
----
-
-## 📄 License
-MIT License. Created by Edgard Corcovado (2026).
+## Reference
+- Li et al., *"GraphReader: Building Graph-based Agent to Enhance Long-Context Abilities of Large Language Models"*, arXiv:2406.14550 (2024).
