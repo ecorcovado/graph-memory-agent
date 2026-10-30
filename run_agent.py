@@ -22,8 +22,9 @@ DEFAULT_QUESTION = "In which historic building was the lab founded where the lea
 
 def main():
     parser = argparse.ArgumentParser(description="Graph Memory Agent - Local Multi-Hop LLM Reasoning")
-    parser.add_argument("--model", type=str, default="qwen2.5-coder:7b", help="Ollama model name")
-    parser.add_argument("--question", type=str, default=DEFAULT_QUESTION, help="Target question")
+    parser.add_argument("--model", type=str, default="qwen2.5-coder:7b", help="Ollama model name (default: qwen2.5-coder:7b)")
+    parser.add_argument("--file", type=str, default=None, help="Path to custom text file or incident log to analyze")
+    parser.add_argument("--question", type=str, default=DEFAULT_QUESTION, help="Target multi-hop question")
     args = parser.parse_args()
 
     print("=" * 70)
@@ -31,11 +32,24 @@ def main():
     print(f"  Target Model: {args.model} (100% Local via Ollama)")
     print("=" * 70)
 
+    # Determine input text
+    if args.file:
+        try:
+            with open(args.file, "r", encoding="utf-8") as f:
+                target_text = f.read()
+            print(f"[*] Loaded custom document from: {args.file} ({len(target_text)} chars)")
+        except Exception as e:
+            print(f"[!] Error reading file '{args.file}': {e}")
+            sys.exit(1)
+    else:
+        print("[*] No --file specified. Using built-in Project Aegis benchmark.")
+        target_text = DEFAULT_DEMO_TEXT
+
     client = LocalOllamaClient(model=args.model)
     builder = GraphBuilder(client)
 
     print("\n[Phase 1] Building Knowledge Graph from text...")
-    kg = builder.build_graph(DEFAULT_DEMO_TEXT)
+    kg = builder.build_graph(target_text)
 
     print("\n[Phase 2] Initializing GraphReader Agent...")
     agent = GraphReaderAgent(client, kg, max_steps=6, verbose=True)

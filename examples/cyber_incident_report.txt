@@ -1,0 +1,11 @@
+Incident Report: INC-2026-1044 (CONFIDENTIAL SOC INTERNAL)
+Status: Contained
+Assigned Analyst: Tier 2 DFIR
+
+Overview:
+On 24 October 2026 at 03:14 UTC, automated endpoint detection flagged an abnormal outbound connection on host WORKSTATION-402 assigned to user jsmith.
+Forensic triage on WORKSTATION-402 identified an obfuscated powershell.exe execution that established an external command-and-control beacon to IP address 198.51.100.44.
+Threat intelligence cross-referencing attributes IP address 198.51.100.44 to the advanced persistent threat group tracked as APT-SilverFox.
+APT-SilverFox is known to maintain endpoint persistence by registering a hidden scheduled task named SystemHealthCheck.
+The SystemHealthCheck scheduled task executes a backdoor DLL signed with a fraudulent certificate issued by GlobalTrust-CA.
+The initial ingress vector was determined to be a spear-phishing attachment simulating a quarterly invoice.

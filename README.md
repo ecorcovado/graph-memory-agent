@@ -69,10 +69,13 @@ cd graph-memory-agent
 # Install dependencies (only networkx required)
 pip install networkx
 
-# Run the multi-hop test
+# 1. Run the built-in benchmark
 python run_agent.py --model qwen2.5-coder:7b
 
-# Run offline unit tests
+# 2. Run against a custom incident report or log file
+python run_agent.py --file examples/cyber_incident_report.txt --question "What persistence scheduled task is associated with the threat group communicating with WORKSTATION-402?"
+
+# 3. Run offline unit tests
 python -m unittest tests/test_components.py
 ```
 
