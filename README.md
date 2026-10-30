@@ -63,7 +63,7 @@ This project runs **100% locally** via Ollama. It extracts an entity co-occurren
 
 ### Setup & Run
 ```bash
-git clone https://github.com/<your-username>/graph-memory-agent.git
+git clone https://github.com/ecorcovado/graph-memory-agent.git
 cd graph-memory-agent
 
 # Install dependencies (only networkx required)
