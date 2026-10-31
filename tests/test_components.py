@@ -952,6 +952,313 @@ class TestGraphMemoryAgent(unittest.TestCase):
         self.assertEqual(res_agent["provenance_accuracy"], "100% (Cryptographic Hashes)")
         self.assertEqual(res_agent["hallucination_rate"], "0.0% (Strict Allowlist Enforcement)")
 
+    def test_source_identifier_sha256_and_record_identity(self):
+        """Architecture Stage 3: Source SHA-256 and Record Identity."""
+        from core.case_loader import SourceIdentifier
+        sample_bytes = b'{"event_id": 1, "host": "CORP-WS-019"}\n'
+        full_sha, source_id = SourceIdentifier.compute_source_identity(sample_bytes)
+        self.assertEqual(len(full_sha), 64)
+        self.assertEqual(len(source_id), 32)
+        self.assertEqual(source_id, full_sha[:32])
+
+    def test_format_detector_sysmon_zeek_and_ot_routing(self):
+        """Architecture Stage 4: Deterministic Format Detection."""
+        from core.adapters import FormatDetector, SysmonAdapter, ZeekAdapter, WindowsSecurityAdapter
+        detector = FormatDetector()
+
+        # 1. Sysmon detection
+        fmt_sysmon, adapter_sysmon = detector.detect_and_get_adapter(
+            file_rel="logs/sysmon.jsonl",
+            sample_records=[{"event_id": 1, "process": "cmd.exe"}],
+        )
+        self.assertEqual(fmt_sysmon, "SYSMON_EVENT")
+        self.assertIsInstance(adapter_sysmon, SysmonAdapter)
+
+        # 2. Zeek detection
+        fmt_zeek, adapter_zeek = detector.detect_and_get_adapter(
+            file_rel="network/conn.log",
+            sample_records=[{"id.orig_h": "10.0.0.1", "id.resp_h": "10.0.0.2", "proto": "tcp"}],
+        )
+        self.assertIn("ZEEK", fmt_zeek)
+        self.assertIsInstance(adapter_zeek, ZeekAdapter)
+
+        # 3. Windows Security detection
+        fmt_winsec, adapter_winsec = detector.detect_and_get_adapter(
+            file_rel="auth/windows_security.jsonl",
+            sample_records=[{"event_id": 4624, "host": "CORP-WS-019"}],
+        )
+        self.assertEqual(fmt_winsec, "WINDOWS_SECURITY")
+        self.assertIsInstance(adapter_winsec, WindowsSecurityAdapter)
+
+    def test_sysmon_adapter_multi_event_parsing(self):
+        """Architecture Stage 5: Sysmon Adapter multi-event parsing."""
+        from core.adapters.sysmon import SysmonAdapter
+        adapter = SysmonAdapter()
+
+        # EID 1: Process Creation
+        evs_1 = adapter.parse_record(
+            record={
+                "event_id": 1,
+                "host": "CORP-WS-019",
+                "process": "C:\\Windows\\System32\\cmd.exe",
+                "command_line": "cmd.exe /c whoami",
+                "parent_process": "C:\\Windows\\explorer.exe",
+                "user": "corp\\j.miller",
+                "sha256": "abcdef123456",
+            },
+            source_id="src_sysmon",
+            file_rel="sysmon.jsonl",
+            line_idx=1,
+            evidence_basis=EVIDENCE_BASIS_TELEMETRY,
+            event_time="2026-10-28T08:14:22Z",
+            ingested_at="2026-10-31T00:00:00Z",
+        )
+        self.assertEqual(len(evs_1), 1)
+        self.assertEqual(evs_1[0].predicate, "executed")
+        self.assertEqual(evs_1[0].object_entity, "cmd.exe")
+        self.assertEqual(evs_1[0].attributes["command_line"], "cmd.exe /c whoami")
+
+        # EID 3: Network Connection
+        evs_3 = adapter.parse_record(
+            record={
+                "event_id": 3,
+                "host": "CORP-WS-019",
+                "destination_ip": "203.0.113.88",
+                "destination_port": 443,
+                "protocol": "TCP",
+            },
+            source_id="src_sysmon",
+            file_rel="sysmon.jsonl",
+            line_idx=2,
+            evidence_basis=EVIDENCE_BASIS_TELEMETRY,
+            event_time="2026-10-28T08:15:00Z",
+            ingested_at="2026-10-31T00:00:00Z",
+        )
+        self.assertEqual(len(evs_3), 1)
+        self.assertEqual(evs_3[0].predicate, "communicated_with")
+        self.assertEqual(evs_3[0].object_entity, "203.0.113.88")
+
+        # EID 11: File Create
+        evs_11 = adapter.parse_record(
+            record={
+                "event_id": 11,
+                "host": "CORP-WS-019",
+                "target_filename": "C:\\Temp\\payload.exe",
+            },
+            source_id="src_sysmon",
+            file_rel="sysmon.jsonl",
+            line_idx=3,
+            evidence_basis=EVIDENCE_BASIS_TELEMETRY,
+            event_time="2026-10-28T08:16:00Z",
+            ingested_at="2026-10-31T00:00:00Z",
+        )
+        self.assertEqual(len(evs_11), 1)
+        self.assertEqual(evs_11[0].predicate, "created")
+        self.assertEqual(evs_11[0].object_entity, "payload.exe")
+
+        # EID 22: DNS Query
+        evs_22 = adapter.parse_record(
+            record={
+                "event_id": 22,
+                "host": "CORP-WS-019",
+                "query_name": "c2.malicious-domain.com",
+            },
+            source_id="src_sysmon",
+            file_rel="sysmon.jsonl",
+            line_idx=4,
+            evidence_basis=EVIDENCE_BASIS_TELEMETRY,
+            event_time="2026-10-28T08:17:00Z",
+            ingested_at="2026-10-31T00:00:00Z",
+        )
+        self.assertEqual(len(evs_22), 1)
+        self.assertEqual(evs_22[0].predicate, "queried_dns")
+        self.assertEqual(evs_22[0].object_entity, "c2.malicious-domain.com")
+
+    def test_zeek_adapter_conn_dns_notice_parsing(self):
+        """Architecture Stage 5: Zeek Adapter network telemetry parsing."""
+        from core.adapters.zeek import ZeekAdapter
+        adapter = ZeekAdapter()
+
+        # 1. Zeek conn.log
+        evs_conn = adapter.parse_record(
+            record={
+                "ts": "2026-10-28T10:45:10Z",
+                "uid": "C12345",
+                "id.orig_h": "10.10.4.19",
+                "id.orig_p": 49152,
+                "id.resp_h": "10.10.35.10",
+                "id.resp_p": 8088,
+                "proto": "tcp",
+                "conn_state": "SF",
+                "orig_bytes": 1024,
+                "resp_bytes": 4096,
+            },
+            source_id="src_zeek",
+            file_rel="conn.log",
+            line_idx=1,
+            evidence_basis=EVIDENCE_BASIS_TELEMETRY,
+            event_time="2026-10-28T10:45:10Z",
+            ingested_at="2026-10-31T00:00:00Z",
+        )
+        self.assertEqual(len(evs_conn), 1)
+        self.assertEqual(evs_conn[0].subject, "10.10.4.19")
+        self.assertEqual(evs_conn[0].predicate, "communicated_with")
+        self.assertEqual(evs_conn[0].object_entity, "10.10.35.10")
+        self.assertEqual(evs_conn[0].attributes["conn_state"], "SF")
+
+        # 2. Zeek dns.log
+        evs_dns = adapter.parse_record(
+            record={
+                "ts": "2026-10-28T10:45:11Z",
+                "uid": "C12346",
+                "id.orig_h": "10.10.4.19",
+                "query": "internal-historian.local",
+                "qtype_name": "A",
+                "answers": ["10.10.35.10"],
+            },
+            source_id="src_zeek",
+            file_rel="dns.log",
+            line_idx=2,
+            evidence_basis=EVIDENCE_BASIS_TELEMETRY,
+            event_time="2026-10-28T10:45:11Z",
+            ingested_at="2026-10-31T00:00:00Z",
+        )
+        self.assertEqual(len(evs_dns), 1)
+        self.assertEqual(evs_dns[0].predicate, "queried_dns")
+        self.assertEqual(evs_dns[0].object_entity, "internal-historian.local")
+
+        # 3. Zeek notice.log
+        evs_notice = adapter.parse_record(
+            record={
+                "ts": "2026-10-28T10:45:12Z",
+                "uid": "C12347",
+                "src": "10.10.4.19",
+                "dst": "10.10.35.10",
+                "note": "Scan::Port_Scan",
+                "msg": "Port scanning detected across DMZ perimeter",
+            },
+            source_id="src_zeek",
+            file_rel="notice.log",
+            line_idx=3,
+            evidence_basis=EVIDENCE_BASIS_TELEMETRY,
+            event_time="2026-10-28T10:45:12Z",
+            ingested_at="2026-10-31T00:00:00Z",
+        )
+        self.assertEqual(len(evs_notice), 1)
+        self.assertEqual(evs_notice[0].predicate, "triggered_notice")
+        self.assertEqual(evs_notice[0].object_entity, "scan::port_scan")
+
+    def test_atomic_fact_generator_rich_attributes_and_provenance(self):
+        """Architecture Stage 7: Atomic Fact Generator."""
+        from core.case_loader import AtomicFactGenerator
+        from core.adapters.base import NormalizedEvent
+
+        ev = NormalizedEvent(
+            source_id="abc12345",
+            record_id="rec_001",
+            source_type="SYSMON_EVENT",
+            event_time="2026-10-28T08:14:22Z",
+            ingested_at="2026-10-31T00:00:00Z",
+            event_type="PROCESS_CREATE",
+            subject="corp-ws-019",
+            predicate="executed",
+            object_entity="powershell.exe",
+            raw_record="{}",
+            source_location="enterprise/sysmon.jsonl:L1",
+            evidence_basis=EVIDENCE_BASIS_TELEMETRY,
+            purdue_level=4.0,
+            attributes={"command_line": "powershell.exe -enc ...", "user": "corp\\j.miller"},
+        )
+
+        fact, tier, basis = AtomicFactGenerator.generate_fact(ev, line_idx=1, raw_record={"user": "corp\\j.miller"})
+        self.assertEqual(fact.fact_id, "abc12345_R1_rec_001")
+        self.assertEqual(tier, "OBSERVED")
+        self.assertEqual(basis, EVIDENCE_BASIS_TELEMETRY)
+        self.assertIn("user: corp\\j.miller", fact.text)
+        self.assertIn("command_line: powershell.exe -enc ...", fact.text)
+
+    def test_string_aware_balanced_brace_json_scanner(self):
+        """Verification of escape-aware, string-aware balanced-brace JSON scanner."""
+        from core.agent import extract_json_objects
+
+        # Complex text with embedded braces in strings, escaped quotes, and outside noise
+        noisy_output = (
+            'Preceding explanation text with a stray opening { brace.\n'
+            '```json\n'
+            '{\n'
+            '  "answer": "Compromise reached {PLC} with \\"escaped quotes\\"",\n'
+            '  "cited_fact_ids": ["fid_101", "fid_102"],\n'
+            '  "status": "SUPPORTED"\n'
+            '}\n'
+            '```\n'
+            'Trailing notes with another stray } brace.'
+        )
+
+        objs = extract_json_objects(noisy_output)
+        self.assertEqual(len(objs), 1)
+        self.assertEqual(objs[0]["status"], "SUPPORTED")
+        self.assertIn("fid_101", objs[0]["cited_fact_ids"])
+        self.assertIn("{PLC}", objs[0]["answer"])
+
+    def test_plaintext_claim_validation_fail_closed_on_unproven_plc_modification(self):
+        """Verification that unverified plaintext claims about PLC logic fail closed."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        # LLM returns plaintext claiming PLC logic download but only cites Sysmon execution fact
+        sysmon_facts = [f for f in kg.atomic_facts.values() if f.relation == "executed"]
+        self.assertTrue(len(sysmon_facts) > 0)
+        sys_fid = sysmon_facts[0].fact_id
+
+        client = MockOllamaClient(responses={
+            "Target Question": f"The attacker downloaded modified logic to the PLC controller [{sys_fid}]."
+        })
+        agent = GraphReaderAgent(client, kg)
+        agent.notebook.add_note(step=1, source_node="corp-ws-019", content="Executed powershell", fact_ids=[sys_fid])
+
+        answer = agent.synthesize_answer("Did the enterprise compromise reach the PLC?")
+        # Without citing a fact with predicate modified_logic on plc-ballast-01, claim validation must fail closed
+        self.assertIn("INSUFFICIENT EVIDENCE", answer)
+        self.assertIn("modified_logic", answer)
+
+    def test_html_report_xss_sanitization(self):
+        """Verification that HTML report properly sanitizes malicious script injection."""
+        import tempfile, shutil
+        from core.reporter import InvestigationReporter
+
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        malicious_note = "<script>alert('XSS_ATTACK')</script>"
+        notebook = Notebook()
+        cip_facts = [f for f in kg.atomic_facts.values() if f.relation == "modified_logic"]
+        notebook.add_note(step=1, source_node="eng-ws-02", content=malicious_note, fact_ids=[cip_facts[0].fact_id])
+
+        reporter = InvestigationReporter(
+            kg=kg,
+            notebook=notebook,
+            answer=f"Result with injection: <img src=x onerror=alert('PWNED')> [{cip_facts[0].fact_id}]",
+            question="<script>alert('XSS_QUERY')</script>"
+        )
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            report_file = os.path.join(temp_dir, "xss_test.html")
+            out_path = reporter.generate_html_report(report_file)
+            with open(out_path, "r", encoding="utf-8") as f:
+                html_content = f.read()
+
+            self.assertNotIn("<script>alert('XSS_QUERY')</script>", html_content)
+            self.assertIn("&lt;script&gt;alert(&#x27;XSS_QUERY&#x27;)&lt;/script&gt;", html_content)
+            self.assertNotIn("<img src=x onerror=alert('PWNED')>", html_content)
+            self.assertIn("&lt;img src=x onerror=alert(&#x27;PWNED&#x27;)&gt;", html_content)
+        finally:
+            shutil.rmtree(temp_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

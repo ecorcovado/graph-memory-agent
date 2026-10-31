@@ -23,7 +23,7 @@ class InvestigationRequirements:
 
 
 def extract_json_objects(text: str) -> List[dict]:
-    """Safely extracts top-level JSON objects using balanced brace parsing to avoid greedy regex capture."""
+    """Safely extracts top-level JSON objects respecting quoted strings, escape characters, and balanced braces."""
     results = []
     # 1. Check for markdown code blocks ```json ... ```
     code_blocks = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
@@ -35,24 +35,38 @@ def extract_json_objects(text: str) -> List[dict]:
     if results:
         return results
 
-    # 2. Balanced brace scanner to safely extract top-level JSON objects without greedy capture
+    # 2. String-aware and escape-aware balanced brace scanner
     start = -1
     depth = 0
+    in_string = False
+    escape = False
+
     for i, ch in enumerate(text):
-        if ch == '{':
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == '}':
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start != -1:
-                    candidate = text[start:i+1]
-                    try:
-                        results.append(json.loads(candidate))
-                    except Exception:
-                        pass
-                    start = -1
+        if escape:
+            escape = False
+            continue
+        if ch == '\\':
+            if in_string:
+                escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if not in_string:
+            if ch == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == '}':
+                if depth > 0:
+                    depth -= 1
+                    if depth == 0 and start != -1:
+                        candidate = text[start:i+1]
+                        try:
+                            results.append(json.loads(candidate))
+                        except Exception:
+                            pass
+                        start = -1
     return results
 
 
@@ -434,20 +448,54 @@ class GraphReaderAgent:
                 "no verifiable citations to atomic fact IDs."
             )
 
-        # 4. Claim-Level Predicate Validation (Finding 3):
-        # Validate that cited facts establish the relationship claimed
+        # 4. Claim-Level Predicate and Entity Validation:
+        all_cited_facts = [self.kg.atomic_facts.get(fid) for fid in cited_fact_ids if fid in self.kg.atomic_facts]
+
+        # A. Validate Structured Claims if present
         if structured_claims:
             for claim in structured_claims:
                 stmt = claim.get("statement", "").lower()
                 c_fids = claim.get("fact_ids", [])
                 claim_facts = [self.kg.atomic_facts.get(fid) for fid in c_fids if fid in self.kg.atomic_facts]
                 if ("plc" in stmt or "logic" in stmt or "controller" in stmt) and "modif" in stmt:
-                    if not any(f.relation == "modified_logic" for f in claim_facts if f):
-                        self._log("CLAIM VALIDATION FAILED", f"Claim '{stmt}' not supported by predicate 'modified_logic'")
+                    has_exact_target = any(
+                        f.relation == "modified_logic" and "plc" in f.object_entity.lower()
+                        for f in claim_facts if f
+                    )
+                    if not has_exact_target:
+                        self._log("CLAIM VALIDATION FAILED", f"Claim '{stmt}' not supported by predicate 'modified_logic' on target controller.")
                         return (
                             f"INSUFFICIENT EVIDENCE: Claim '{claim.get('statement')}' cites facts that do not "
-                            f"establish required predicate 'modified_logic'."
+                            f"establish required predicate 'modified_logic' on the specified controller."
                         )
+
+        # B. Plaintext Claim Validation (prevents verification bypass on unstructured text)
+        ans_lower = answer.lower()
+        if "insufficient evidence" not in ans_lower:
+            # If answer asserts PLC modification or download
+            if ("plc" in ans_lower or "controller" in ans_lower) and ("modif" in ans_lower or "download" in ans_lower or "logic" in ans_lower):
+                has_exact_target = any(
+                    f.relation == "modified_logic" and "plc" in f.object_entity.lower()
+                    for f in all_cited_facts if f
+                )
+                if not has_exact_target:
+                    self._log("CLAIM VALIDATION FAILED", "Plaintext assertion of PLC logic modification lacks cited fact with predicate 'modified_logic'.")
+                    return (
+                        "INSUFFICIENT EVIDENCE: Generated answer asserts PLC logic modification, but cited facts "
+                        "do not verify predicate 'modified_logic' on target controller."
+                    )
+            # If answer asserts safety interlock suppression / bypass
+            if "interlock" in ans_lower and ("bypass" in ans_lower or "suppress" in ans_lower or "inhibit" in ans_lower):
+                has_interlock = any(
+                    f.relation in ["interlock_status", "actual_state", "commanded_state"]
+                    for f in all_cited_facts if f
+                )
+                if not has_interlock:
+                    self._log("CLAIM VALIDATION FAILED", "Plaintext assertion of safety interlock bypass lacks cited fact verifying interlock telemetry.")
+                    return (
+                        "INSUFFICIENT EVIDENCE: Generated answer asserts safety interlock bypass, but cited facts "
+                        "do not verify physical interlock telemetry."
+                    )
 
         self._log("EVIDENCE VERIFIED", f"All cited Fact IDs verified against notebook: {cited_fact_ids}")
         self._log("FINAL ANSWER", answer)

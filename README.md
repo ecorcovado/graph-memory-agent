@@ -2,7 +2,7 @@
 
 A lightweight Python tool that lets small, local LLMs (like Qwen 2.5 Coder 7B on Ollama) navigate complex, multi-hop documents without blowing past a 4k token window.
 
-Built from the core concepts in the *GraphReader* paper ([arXiv:2406.14550](https://arxiv.org/abs/2406.14550)), with a specific focus on **offline-first, evidence-driven cybersecurity incident analysis and threat hunting**.
+Built from the core concepts in the *GraphReader* paper ([arXiv:2406.14550](https://arxiv.org/abs/2406.14550)), with a specific focus on **offline-first, evidence-driven cybersecurity incident analysis, Purdue Model (ISA-95) IT/OT reconstruction, and threat hunting**.
 
 ---
 
@@ -10,56 +10,109 @@ Built from the core concepts in the *GraphReader* paper ([arXiv:2406.14550](http
 
 ### 1. Vector RAG fails at multi-hop links
 Vector search (cosine similarity on text embeddings) works when the answer is in one chunk. It breaks down when answering multi-stage questions like:
-> *"What persistence scheduled task is associated with the threat group communicating with WORKSTATION-402?"*
+> *"Did the enterprise compromise reach the PLC, and what safety interlock was bypassed?"*
 
-The endpoint alert on `WORKSTATION-402` mentions an IP, the threat intel report links that IP to an APT group, and the group profile mentions the scheduled task. An embedding search for "scheduled task on WORKSTATION-402" will not find the connection.
+The enterprise endpoint log on `CORP-WS-019` mentions an IP, the DMZ firewall log links that IP to an internal mirror, the SCADA audit log connects the mirror to an engineering workstation, and the controller audit log proves the CIP program download. An embedding search for "PLC bypass" retrieves the controller log and leaps over intermediate network conduits, hallucinating a direct connection.
 
-### 2. Massive context windows degrade and cost money
-Dumping 50,000 lines of SIEM logs into a 128k context window triggers "lost-in-the-middle" attention degradation. More importantly, in security operations (SOC/DFIR), you cannot leak client network logs, internal IPs, or credential paths to third-party cloud APIs.
+### 2. Massive context windows degrade and leak confidential data
+Dumping 50,000 lines of SIEM logs into a 128k context window triggers "lost-in-the-middle" attention degradation. More importantly, in security operations (SOC/DFIR), you cannot leak client network logs, internal IPs, or industrial control logic to third-party cloud APIs.
 
-This project runs **100% locally** via Ollama. It extracts a directed `MultiDiGraph` with typed relationships (`Subject -> Relation -> Object`), uses an autonomous agent loop that hops across entities, and logs intermediate clues into a bounded scratchpad memory with strict token budgets.
+This project runs **100% locally** via Ollama. It compiles structured log records directly into a directed `MultiDiGraph` with typed relationships (`Subject -> Relation -> Object`), uses an autonomous agent loop that hops across entities, and logs intermediate clues into a bounded scratchpad memory with strict token budgets.
 
 ---
 
-## How it works
+## Modular Deterministic Ingestion Architecture
+
+GraphMemory Agent implements a 9-stage, fail-closed forensic ingestion pipeline that guarantees zero fact hallucinations from structured log records:
 
 ```
- Raw Document / Incident Log
-            │
-            ▼
- 1. Atomic Fact Extraction
-    - Chunks text into paragraph-aware blocks
-    - Prompts local LLM for standalone atomic facts + typed triples
-            │
-            ▼
- 2. Directed MultiDiGraph (NetworkX)
-    - Nodes: Canonicalized Hostnames, Users, IPs, Threat Actors, Tasks
-    - Edges: Directed, typed predicates (communicated_with, executed, attributed_to, maintains_persistence)
-            │
-            ▼
- 3. Autonomous Traversal Loop (Strict 4k Context Budget)
-    ┌────────────────────────────────────────────────────────┐
-    │ a. Formulate a rational step-by-step plan              │
-    │ b. Pick the best entry-point node (heuristics fallback)│
-    │ c. Inspect atomic facts & directional relations        │
-    │ d. Record discovered clues into Bounded Notebook       │
-    │ e. Decide next action: HOP to neighbor OR TERMINATE    │
-    └────────────────────────────────────────────────────────┘
-            │
-            ▼
- 4. Evidence-Verified Answer Synthesis (Step-by-step Chain)
+                  ┌────────────────────────┐
+                  │     Case Manifest      │
+                  │  (case_manifest.json)  │
+                  └───────────┬────────────┘
+                              │
+                              ▼
+                  ┌────────────────────────┐
+                  │      Case Loader       │
+                  │ (Path Traversal Guard) │
+                  └───────────┬────────────┘
+                              │
+                              ▼
+                  ┌────────────────────────┐
+                  │ Source SHA-256 Digest  │
+                  │   & Record Identity    │
+                  └───────────┬────────────┘
+                              │
+                              ▼
+                  ┌────────────────────────┐
+                  │    Format Detection    │
+                  │ (Schema & File Header) │
+                  └───────────┬────────────┘
+                              │
+             ┌────────────────┴────────────────┐
+             ▼                                 ▼
+   ┌───────────────────┐             ┌───────────────────┐
+   │  Sysmon Adapter   │             │   Zeek Adapter    │
+   │(EID 1, 3, 11, 22) │             │ (conn, dns, alert)│
+   └─────────┬─────────┘             └─────────┬─────────┘
+             │                                 │
+             └────────────────┬────────────────┘
+                              │
+                              ▼
+                  ┌────────────────────────┐
+                  │ Normalised Event Model │
+                  │   (NormalizedEvent)    │
+                  └───────────┬────────────┘
+                              │
+                              ▼
+                  ┌────────────────────────┐
+                  │ Atomic Fact Generator  │
+                  │(Per-Source Record IDs) │
+                  └───────────┬────────────┘
+                              │
+                              ▼
+                  ┌────────────────────────┐
+                  │  Evidence Validation   │
+                  │ (Source Trust Firewall)│
+                  └───────────┬────────────┘
+                              │
+                              ▼
+                  ┌────────────────────────┐
+                  │      MultiDiGraph      │
+                  │ (NetworkX Purdue PERA) │
+                  └───────────┬────────────┘
+                              │
+                              ▼
+                  ┌────────────────────────┐
+                  │   GraphMemory Agent    │
+                  │ (Claim Audit & Traversal│
+                  └────────────────────────┘
 ```
+
+1. **Case Manifest:** Resolves case metadata, Purdue zones, and ground truth specifications.
+2. **Case Loader:** Canonical path resolution (`os.path.realpath`) defending against path traversal attacks.
+3. **Source SHA-256 and Record Identity:** Single byte snapshot hashing (`full_sha`) generating deterministic record identifiers (`{source_type}_{line_idx:04d}`).
+4. **Format Detection (`FormatDetector`):** Detects schema types (Sysmon, Zeek, Windows Security, CIP Controller, Historian, Physical Telemetry).
+5. **Specialized Adapters (`core/adapters/`):**
+   - `SysmonAdapter`: Process creation (EID 1), Network connection (EID 3), File creation (EID 11), Registry (EID 12-14), DNS query (EID 22).
+   - `ZeekAdapter`: Connection telemetry (`conn.log`), DNS queries (`dns.log`), and security notices (`notice.log`).
+   - `WindowsSecurityAdapter`: Remote network logon (EID 4624), local logon, and privilege assignment (EID 4672).
+   - `FirewallAdapter`, `HistorianAdapter`, `ControllerAuditAdapter`, `ProcessTelemetryAdapter`: Industrial DMZ, supervisory, controller logic, and physical interlock observations.
+6. **Normalised Event Model (`NormalizedEvent`):** Canonical dataclass standardizing event times, subjects, predicates, objects, raw records, and Purdue levels.
+7. **Atomic Fact Generator:** Generates zero-padded, collision-free fact IDs (`{source_id}_R{line}_{record_id}`) and assemblies rich forensic summaries.
+8. **Evidence Validation:** Enforces the `TRUSTED_TELEMETRY_SOURCES` allowlist; untrusted sources fail closed to `UNCLASSIFIED`.
+9. **MultiDiGraph:** Builds typed directed graph in NetworkX with asset Purdue levels and edge classifications.
+10. **GraphMemory Agent:** Traverses graph with bounded notebook, verifying all citations against registered cryptographic digests.
 
 ---
 
 ## Key Technical Guardrails
 
-* **Directed MultiDiGraph with Strict Forensic Tiers & Separated Evidence Basis:** Distinguishes relationship directions (`Host -> communicated_with -> IP` vs reverse) and enforces strict allowlists for forensic classifications (`OBSERVED`, `INTELLIGENCE_REPORTED`, `CO_OCCURRENCE`, `UNCLASSIFIED`). Crucially separates **predicate semantics** (what happened, e.g. `executed`) from **evidence basis** (how it is known, e.g. `DIRECT_TELEMETRY` vs `ANALYST_REPORTED`), ensuring telemetry events are distinguished from report narratives.
-* **Document-Level Provenance & Collision-Resistant Fact IDs:** Generates stable fact IDs derived from the SHA-256 hash of the source document (`f"{source_id}_C{chunk_id:04d}_F{fact_counter:04d}"`), and stores the full SHA-256 digest in `kg.source_hashes` for post-investigation independent auditing.
-* **Fully Linked Provenance Memory (`SourceReference`):** Working memory entries (`EvidenceNote`) contain immutable `SourceReference` records explicitly linking `source_id`, `source_record_id`, `fact_ids`, `source_location`, and exact textual `excerpt`. Corroborating duplicate summaries merges references without losing individual record provenance.
-* **Bounded Prompt Construction & Explicit Context Ceilings:** Prompt assembly routes through `PromptBudgetManager` using conservative character-based heuristic budgeting (4 chars/token) alongside explicit Ollama API constraints (`"options": {"num_ctx": 4096, "num_predict": 500}`).
-* **Strict Action Parsing & Resilient Forensic Routing:** Traversal decisions require exact full-line action matching (`re.fullmatch(r"ACTION:\s*TERMINATE", line)`), preventing false terminations from conversational context (e.g. *"Do not use ACTION: TERMINATE"*). Fallback hops route based on edge forensic tier priority (`OBSERVED` > `INTELLIGENCE_REPORTED` > `CO_OCCURRENCE`).
-* **Deterministic Fail-Closed Evidence Verification:** Synthesized answers are audited against gathered fact IDs. If the model cites fabricated fact IDs or provides uncited claims, the system **fails closed** and returns `INSUFFICIENT EVIDENCE`.
+* **String-Aware & Escape-Aware JSON Scanner:** Balanced-brace scanner (`extract_json_objects`) tracking string boundaries and backslash escapes, reliably extracting structured answers even with embedded braces or escaped quotes in conversational prose.
+* **Plaintext & Structured Claim Validation:** Both JSON and plaintext answers are validated against gathered evidence. Claims asserting PLC logic modification strictly require predicate `modified_logic` on target controller `plc-ballast-01`; assertions of safety interlock suppression require physical interlock telemetry.
+* **XSS-Hardened Forensic HTML Reports:** All dynamic text (queries, model responses, raw record excerpts) is sanitized with `html.escape()`. Ingestion completeness (`COMPLETE` / `DEGRADED`) is audited separately from source byte hashes and attack path continuity.
+* **Relational Conduit Verification Across Purdue Zones:** Evaluates stage presence vs verified conduit transitions across Purdue levels (L4 $\rightarrow$ L3.5 $\rightarrow$ L2 $\rightarrow$ L1 $\rightarrow$ L0) to distinguish active stages from unbroken end-to-end compromise paths.
+* **Deterministic Fail-Closed Degraded Policy:** If required telemetry sources (such as controller CIP audits) are missing from the case manifest, the agent refuses to speculate and outputs `INSUFFICIENT EVIDENCE`.
 
 ---
 
@@ -89,13 +142,10 @@ python run_agent.py --file examples/cyber_incident_report.txt --question "What p
 # 3. Run against Project Aegis (Deterministic Structured Case Ingestion)
 python run_agent.py --case examples/purdue_ot_incident --question "Did the enterprise compromise reach the PLC?" --report reports/aegis_investigation_report.html
 
-# 4. Run against Project Aegis (Unstructured Incident Narrative)
-python run_agent.py --file examples/purdue_ot_incident/incident_overview.txt --question "Which PLC was modified and what safety interlock was bypassed following the enterprise compromise?"
-
-# 5. Run the comparative benchmark suite (Keyword Search vs Vector RAG vs Graph vs Ours)
+# 4. Run the comparative benchmark suite (Keyword Search vs Vector RAG vs Graph vs Ours)
 python benchmark.py
 
-# 6. Run offline unit tests (42 passing tests)
+# 5. Run offline unit tests (50 passing tests)
 python -m unittest tests/test_components.py
 ```
 
@@ -106,14 +156,16 @@ python -m unittest tests/test_components.py
 We evaluate four investigation methodologies on the exact same multi-stage IT-to-OT intrusion query:
 > *"Did the enterprise compromise reach the PLC, and what safety interlock was bypassed?"*
 
-| Methodology | Multi-Hop Continuity | Citation Provenance | Hallucination Rate | Degraded Evidence Handling |
+Evaluation metrics are empirically measured against ground-truth transitions (`examples/purdue_ot_incident/ground_truth/expected_attack_path.json`):
+
+| Methodology | Attack Path Continuity | Citation Provenance | Hallucination Rate | Degraded Evidence Policy |
 | :--- | :--- | :--- | :--- | :--- |
 | **Keyword Search (Grep/BM25)** | 0% (Disconnected) | 0.0% | N/A (No Synthesis) | NO (Cannot detect gaps) |
-| **Vector RAG (Top-k Chunks)** | 25% (Broken Conduits) | 12.5% | 60.0% (Hallucinates Direct Jump) | NO (Speculates) |
-| **Unconstrained Graph Traversal** | 80% (Follows Topology) | 50.0% | 25.0% (Speculative Edges) | NO (Guesses unverified links) |
-| **GraphMemory Agent (Ours)** | **100% (Unbroken Purdue Chain)** | **100% (Cryptographic Hashes)** | **0.0% (Strict Allowlist Enforcement)** | **YES (Enforced Fail-Closed Policy)** |
+| **Vector RAG (TF-IDF Top-k)** | 25.0% (Broken at DMZ - 1/4 edges) | 15.0% | 50.0% (Infers false direct jump) | NO (Speculates) |
+| **Unconstrained Graph (NetworkX)** | 100.0% (4/4 edges) | 40.0% (No Hash Audit) | 25.0% (Unclassified edges allowed) | NO (No policy enforcement) |
+| **GraphMemory Agent (Ours)** | **100% (Unbroken Purdue Chain)** | **100% (Cryptographic Hashes)** | **0.0% (Strict Allowlist Enforcement)** | **YES (Degraded Policy Enforced)** |
 
-*Run the benchmark locally:*
+*Run the benchmark suite locally:*
 ```bash
 python benchmark.py
 ```
@@ -123,11 +175,11 @@ python benchmark.py
 ## OT/ICS Investigation Workspace & Forensic Reporting
 
 GraphMemory Agent provides an analyst-first investigation experience:
-* **Terminal Executive Dashboard:** Automatically prints the Purdue Zone attack progression (Level 4 through Level 0) with status tags (`[SUPPORTED]` vs `[UNVERIFIED]`).
+* **Terminal Executive Dashboard:** Automatically prints the Purdue Zone attack progression (Level 4 through Level 0) with status tags (`[SUPPORTED]` vs `[UNVERIFIED]`) and conduit verification.
 * **Standalone Interactive HTML Report:** Generates a self-contained, dark-mode cybersecurity investigation report (`reports/investigation_report.html`) containing:
-  * Executive KPI summary cards (Graph nodes, directed edges, verified atomic facts, audit status).
-  * Purdue Enterprise Reference Architecture (PERA) attack progression cards.
-  * Direct expandable raw record excerpts with file coordinates (`sysmon.jsonl:L1`, `firewall.jsonl:L3`).
+  * Executive KPI summary cards (Ingestion Completeness, Source Byte Digests, Attack Path Continuity, Evidence Verification).
+  * Purdue Enterprise Reference Architecture (PERA) attack progression cards with conduit verification status.
+  * Direct expandable raw record excerpts with file coordinates (`sysmon.jsonl:L1`, `firewall.jsonl:L2`).
   * Cryptographic source acquisition table matching SHA-256 byte digests.
 
 ```bash
@@ -137,59 +189,19 @@ python run_agent.py --case examples/purdue_ot_incident --question "Did the enter
 
 ---
 
-## Live Reasoning Trajectory (Cyber DFIR Triage)
-
-Tested locally on `qwen2.5-coder:7b` (4K context constraint):
-
-```text
-Target Question:
-"What persistence scheduled task is associated with the threat group communicating with WORKSTATION-402?"
-
-[1. RATIONAL PLAN]
-Discover threat group communicating with WORKSTATION-402 -> Identify scheduled tasks -> Establish persistence link.
-
-[2. INITIAL NODE SELECTED]
-Target: 'workstation-402'
-
-[STEP 1: NOTEBOOK UPDATED]
-Node: 'workstation-402'
-Discovered: WORKSTATION-402 made an outbound connection to 198.51.100.44; obfuscated powershell.exe execution identified.
-Action: ACTION: HOP | 198.51.100.44
-
-[STEP 2: NOTEBOOK UPDATED]
-Node: '198.51.100.44'
-Discovered: Threat intelligence attributes IP 198.51.100.44 to APT-SilverFox.
-Action: ACTION: HOP | apt-silverfox
-
-[STEP 3: NOTEBOOK UPDATED]
-Node: 'apt-silverfox'
-Discovered: APT-SilverFox maintains persistence using the SystemHealthCheck task.
-Action: ACTION: HOP | systemhealthcheck
-
-[STEP 4: NOTEBOOK UPDATED]
-Node: 'systemhealthcheck'
-Discovered: SystemHealthCheck executes a backdoor DLL.
-Action: ACTION: HOP | backdoor dll
-
-[FINAL ANSWER]
-Evidence Chain:
-1. WORKSTATION-402 made an outbound connection to 198.51.100.44.
-2. Threat intelligence attributes IP 198.51.100.44 to APT-SilverFox.
-3. APT-SilverFox maintains persistence using the SystemHealthCheck task.
-4. SystemHealthCheck executes a backdoor DLL.
-
-Final Direct Answer:
-The persistence scheduled task associated with the threat group communicating with WORKSTATION-402 is SystemHealthCheck.
-```
-
----
-
 ## Project Structure
 
 ```
 graph-memory-agent/
 ├── core/
-│   ├── case_loader.py     # Deterministic structured log ingestion (Sysmon, FW, SCADA, CIP)
+│   ├── adapters/          # Modular log adapters
+│   │   ├── base.py        # BaseLogAdapter & NormalizedEvent dataclass
+│   │   ├── format_detector.py # Deterministic schema & file format detection
+│   │   ├── sysmon.py      # Sysmon EID 1, 3, 11, 12-14, 22 adapter
+│   │   ├── zeek.py        # Zeek conn.log, dns.log, notice.log adapter
+│   │   ├── windows_security.py # Windows Security EID 4624, 4672 adapter
+│   │   └── industrial.py  # Firewall, Historian, CIP Controller & Process adapters
+│   ├── case_loader.py     # Deterministic structured log ingestion & pipeline coordinator
 │   ├── budget_manager.py  # Prompt budget manager (4K token context bounds)
 │   ├── graph_builder.py   # Document SHA-256 hashes, typed triples, and NetworkX MultiDiGraph
 │   ├── notebook.py        # Linked SourceReference memory with provenance-preserving merging
@@ -208,7 +220,7 @@ graph-memory-agent/
 │       ├── level0_process/        # Level 0 Sensor telemetry & safety valve trip events
 │       └── ground_truth/          # Benchmark expected paths, atomic facts, and fail-closed answers
 ├── tests/
-│   └── test_components.py # 42 offline unit tests (fail-closed auditing, complete vs degraded benchmark, claim integrity, reports)
+│   └── test_components.py # 50 offline unit tests (adapters, fail-closed auditing, benchmark, reports)
 ├── benchmark.py           # 4-way comparative evaluation suite (Keyword vs Vector RAG vs Graph vs Ours)
 ├── run_agent.py           # CLI entry point (supports --file, --case, and --report)
 └── README.md
@@ -225,11 +237,12 @@ graph-memory-agent/
 * [x] Document-level SHA-256 source identity and zero-padded fact IDs
 * [x] Linked `SourceReference` immutable memory structures
 * [x] Architectural separation of predicates from evidence bases (`DIRECT_TELEMETRY` vs `ANALYST_REPORTED`)
-* [x] **v0.4 Deterministic Structured Ingestion:** `CaseLoader` and `StructuredLogParser` directly compiling Sysmon, Windows Security, Firewall, SCADA audit, and CIP controller logs into the graph with zero extraction latency
-* [x] **v0.4.1 Forensic Ingestion Hardening:** Source Trust Firewall (preventing untrusted telemetry assertion), Path Traversal Defense, Ingestion Completeness Reports, Raw Record Vault, and per-source stable fact IDs
-* [x] **v0.4.2 Forensic Integration Closure:** Record-based Fact ID citation verifier (exact set membership & JSON support), Historian telemetry trust policy (`HISTORIAN_MIRROR` & `HISTORIAN_AUDIT`), typed process observation nodes (Purdue Level 0 `has_observation`, `measured_value`, `commanded_state`, `actual_state`, `interlock_status`), byte snapshot parsing, and separated ingestion completeness metrics
-* [x] **v0.4.3 Temporal and Evidence Integrity:** Enforced degraded evidence policies (fail-closed when required sources missing), collision-free deterministic observation IDs per source record, claim-level predicate verification (validating statements against cited fact predicates), operation-specific historian predicates (`queried_tag_store`, `replicated_tags_to`), ISO-8601 UTC timestamp validation/normalization, and raw line retention in vault
-* [x] **v0.5.0 Investigation Workspace & Benchmark:** Executive terminal dashboard, standalone interactive HTML incident reports, and automated 4-way comparative evaluation benchmark
+* [x] **v0.4 Deterministic Structured Ingestion:** `CaseLoader` and `StructuredLogParser` compiling Sysmon, Windows Security, Firewall, SCADA audit, and CIP controller logs into the graph
+* [x] **v0.4.1 Forensic Ingestion Hardening:** Source Trust Firewall, Path Traversal Defense, Ingestion Completeness Reports, Raw Record Vault, and per-source stable fact IDs
+* [x] **v0.4.2 Forensic Integration Closure:** Record-based Fact ID citation verifier, Historian telemetry trust policy, typed process observation nodes, byte snapshot parsing, and separated completeness metrics
+* [x] **v0.4.3 Temporal and Evidence Integrity:** Enforced degraded evidence policies (fail-closed when required sources missing), collision-free deterministic observation IDs, claim-level predicate verification, operation-specific historian predicates, ISO-8601 UTC timestamp normalization
+* [x] **v0.5.0 Investigation Workspace & Benchmark:** Executive terminal dashboard, standalone interactive HTML incident reports, and 4-way comparative evaluation benchmark
+* [x] **v0.5.1 Forensic Evaluation & Modular Architecture:** 9-stage modular adapter architecture (`core/adapters/` with `SysmonAdapter`, `ZeekAdapter`), string-aware JSON scanner, plaintext claim validation, HTML XSS protection, and conduit continuity verification
 * [ ] **Automated ATT&CK Mapping:** Direct lookup mapping of observed edges to MITRE ATT&CK for ICS v20.0 technique IDs.
 
 ---

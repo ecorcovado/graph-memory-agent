@@ -28,6 +28,7 @@ OBSERVED_PREDICATES = {
     "modified_logic", "sent_command", "authenticated_to", "scanned",
     "has_observation", "measured_value", "commanded_state", "actual_state", "interlock_status",
     "queried_tag_store", "replicated_tags_to",
+    "queried_dns", "triggered_notice", "http_request",
 }
 
 INTELLIGENCE_PREDICATES = {
@@ -56,7 +57,8 @@ VALID_EVIDENCE_BASES = {
 TRUSTED_TELEMETRY_SOURCES = {
     "SYSMON_EVENT", "WINDOWS_SECURITY", "FIREWALL_LOG",
     "HISTORIAN_MIRROR", "HISTORIAN_AUDIT", "SCADA_AUDIT",
-    "CONTROLLER_AUDIT", "PROCESS_TELEMETRY", "ZEEK_FLOW"
+    "CONTROLLER_AUDIT", "PROCESS_TELEMETRY", "ZEEK_FLOW",
+    "ZEEK_LOG", "ZEEK_CONN", "ZEEK_DNS", "ZEEK_NOTICE"
 }
 
 
