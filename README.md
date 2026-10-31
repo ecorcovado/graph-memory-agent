@@ -92,7 +92,7 @@ python run_agent.py --case examples/purdue_ot_incident --question "Did the enter
 # 4. Run against Project Aegis (Unstructured Incident Narrative)
 python run_agent.py --file examples/purdue_ot_incident/incident_overview.txt --question "Which PLC was modified and what safety interlock was bypassed following the enterprise compromise?"
 
-# 5. Run offline unit tests (28 passing tests)
+# 5. Run offline unit tests (34 passing tests)
 python -m unittest tests/test_components.py
 ```
 
@@ -168,8 +168,8 @@ graph-memory-agent/
 │       ├── level0_process/        # Level 0 Sensor telemetry & safety valve trip events
 │       └── ground_truth/          # Benchmark expected paths, atomic facts, and fail-closed answers
 ├── tests/
-│   └── test_components.py # 28 offline unit tests (fail-closed auditing, path continuity, source trust, completeness)
-├── run_agent.py           # CLI entry point (supports --file and --case)
+│   └── test_components.py # 34 offline unit tests (fail-closed auditing, path continuity, source trust, completeness)
+├── run_agent.py           # CLI entry point (supports --file and --case with degraded ingestion warning policy)
 └── README.md
 ```
 
@@ -186,6 +186,7 @@ graph-memory-agent/
 * [x] Architectural separation of predicates from evidence bases (`DIRECT_TELEMETRY` vs `ANALYST_REPORTED`)
 * [x] **v0.4 Deterministic Structured Ingestion:** `CaseLoader` and `StructuredLogParser` directly compiling Sysmon, Windows Security, Firewall, SCADA audit, and CIP controller logs into the graph with zero extraction latency
 * [x] **v0.4.1 Forensic Ingestion Hardening:** Source Trust Firewall (preventing untrusted telemetry assertion), Path Traversal Defense, Ingestion Completeness Reports, Raw Record Vault, and per-source stable fact IDs
+* [x] **v0.4.2 Forensic Integration Closure:** Record-based Fact ID citation verifier (exact set membership & JSON support), Historian telemetry trust policy (`HISTORIAN_MIRROR` & `HISTORIAN_AUDIT`), typed process observation nodes (Purdue Level 0 `has_observation`, `measured_value`, `commanded_state`, `actual_state`, `interlock_status`), byte snapshot parsing, and separated ingestion completeness metrics
 * [x] **Mathematical Path Continuity & Fail-Closed Benchmarks:** Automated tests asserting strict edge continuity and fail-closed termination when controller audit evidence is missing
 * [ ] **Automated ATT&CK Mapping:** Direct lookup mapping of observed edges to MITRE ATT&CK for ICS v20.0 technique IDs.
 

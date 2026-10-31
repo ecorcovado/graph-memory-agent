@@ -4,13 +4,15 @@ Ensures MultiDiGraph directed construction, strict allowlist edge tiers,
 fail-closed evidence auditing, multi-source provenance merging, and budget assembly function offline.
 """
 
+import json
+import os
 import unittest
 from core.notebook import Notebook, EvidenceNote, SourceReference
 from core.graph_builder import (
     AtomicFact, KnowledgeGraph, normalize_entity, classify_relation,
     classify_relation_forensics, ForensicRelation, GraphBuilder,
     EVIDENCE_BASIS_TELEMETRY, EVIDENCE_BASIS_REPORTED, EVIDENCE_BASIS_INTEL,
-    EVIDENCE_BASIS_UNCLASSIFIED,
+    EVIDENCE_BASIS_UNCLASSIFIED, TRUSTED_TELEMETRY_SOURCES,
 )
 from core.case_loader import CaseLoader, NormalizedEvent, StructuredLogParser
 from core.budget_manager import PromptBudgetManager
@@ -549,6 +551,170 @@ class TestGraphMemoryAgent(unittest.TestCase):
         kg_partial = loader.load_case(exclude_sources=["controller_audit.jsonl"])
         self.assertFalse(kg_partial.ingestion_report.is_complete)
         self.assertIn("level1_plc/controller_audit.jsonl", kg_partial.ingestion_report.missing_sources)
+
+    def test_citation_verifier_with_caseloader_record_ids(self):
+        import os
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        # Retrieve an actual real CaseLoader fact ID
+        real_fact_id = list(kg.atomic_facts.keys())[0]
+        self.assertIn("_R", real_fact_id)
+
+        # 1. Plain text citing valid CaseLoader fact ID -> Success
+        valid_response = f"The incident analysis confirms the activity. Citation: {real_fact_id}."
+        client = MockOllamaClient(responses={"Question 1": valid_response})
+        agent = GraphReaderAgent(client, kg)
+        agent.notebook.add_note(step=1, source_node="test_node", content="Observed activity", fact_ids=[real_fact_id])
+        ans = agent.synthesize_answer("Question 1")
+        self.assertNotIn("INSUFFICIENT EVIDENCE", ans)
+        self.assertIn(real_fact_id, ans)
+
+        # 2. Structured JSON citing valid CaseLoader fact ID -> Success
+        json_response = f'{{"answer": "Verified telemetry activity", "cited_fact_ids": ["{real_fact_id}"], "status": "SUPPORTED"}}'
+        client_json = MockOllamaClient(responses={"Question 2": json_response})
+        agent_json = GraphReaderAgent(client_json, kg)
+        agent_json.notebook.add_note(step=1, source_node="test_node", content="Observed activity", fact_ids=[real_fact_id])
+        ans_json = agent_json.synthesize_answer("Question 2")
+        self.assertNotIn("INSUFFICIENT EVIDENCE", ans_json)
+
+        # 3. Fabricated ID alongside valid ID -> Fail closed
+        fabricated_id = "99999999999999999999999999999999_R1_fabricated_record"
+        fraud_response = f"Activity confirmed: {real_fact_id} and {fabricated_id}."
+        client_fraud = MockOllamaClient(responses={"Question 3": fraud_response})
+        agent_fraud = GraphReaderAgent(client_fraud, kg)
+        agent_fraud.notebook.add_note(step=1, source_node="test_node", content="Observed activity", fact_ids=[real_fact_id])
+        ans_fraud = agent_fraud.synthesize_answer("Question 3")
+        self.assertIn("INSUFFICIENT EVIDENCE", ans_fraud)
+        self.assertIn("unverified fact IDs", ans_fraud)
+
+    def test_historian_telemetry_source_trust_policy(self):
+        # Both HISTORIAN_MIRROR and HISTORIAN_AUDIT must be trusted and classified as OBSERVED
+        tier_mirror, basis_mirror = classify_relation_forensics(
+            "connected_to",
+            source_type="HISTORIAN_MIRROR",
+            evidence_basis=EVIDENCE_BASIS_TELEMETRY,
+        )
+        self.assertEqual(tier_mirror, "OBSERVED")
+        self.assertEqual(basis_mirror, EVIDENCE_BASIS_TELEMETRY)
+
+        tier_audit, basis_audit = classify_relation_forensics(
+            "connected_to",
+            source_type="HISTORIAN_AUDIT",
+            evidence_basis=EVIDENCE_BASIS_TELEMETRY,
+        )
+        self.assertEqual(tier_audit, "OBSERVED")
+        self.assertEqual(basis_audit, EVIDENCE_BASIS_TELEMETRY)
+
+    def test_source_type_mapping_trust_policy_coverage(self):
+        # Every source mapped by CaseLoader must have a recognized trust policy
+        for filename, source_type in CaseLoader.SOURCE_TYPE_MAPPING.items():
+            self.assertIn(
+                source_type,
+                TRUSTED_TELEMETRY_SOURCES,
+                f"Source type '{source_type}' from file '{filename}' lacks defined policy in TRUSTED_TELEMETRY_SOURCES"
+            )
+
+    def test_process_telemetry_typed_observation_nodes(self):
+        import os
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        # 1. Pressure transmitter must link to an observation node, not directly to raw measurement string
+        self.assertTrue(kg.graph.has_node("pt-4012"))
+        obs_nodes = [
+            tgt for tgt, edge_data in kg.graph["pt-4012"].items()
+            if any(attr.get("relation") == "has_observation" for attr in edge_data.values())
+        ]
+        self.assertTrue(len(obs_nodes) > 0, "pt-4012 must have an observation node via has_observation")
+        pressure_obs = obs_nodes[0]
+
+        # Observation node must link to measured value
+        val_nodes = [
+            tgt for tgt, edge_data in kg.graph[pressure_obs].items()
+            if any(attr.get("relation") == "measured_value" for attr in edge_data.values())
+        ]
+        self.assertIn("12.4_bar", val_nodes)
+
+        # 2. Valve XV-4012 must link to observation node with commanded, actual, and interlock states
+        self.assertTrue(kg.graph.has_node("xv-4012"))
+        valve_obs_nodes = [
+            tgt for tgt, edge_data in kg.graph["xv-4012"].items()
+            if any(attr.get("relation") == "has_observation" for attr in edge_data.values())
+        ]
+        self.assertTrue(len(valve_obs_nodes) > 0, "xv-4012 must have an observation node via has_observation")
+        valve_obs = valve_obs_nodes[0]
+
+        # Check commanded_state, actual_state, interlock_status predicates on observation node
+        relations_from_obs = {
+            attr.get("relation"): tgt
+            for tgt, edge_dict in kg.graph[valve_obs].items()
+            for attr in edge_dict.values()
+        }
+        self.assertIn("commanded_state", relations_from_obs)
+        self.assertEqual(relations_from_obs["commanded_state"], "open_inhibited")
+        self.assertIn("actual_state", relations_from_obs)
+        self.assertEqual(relations_from_obs["actual_state"], "closed")
+        self.assertIn("interlock_status", relations_from_obs)
+        self.assertEqual(relations_from_obs["interlock_status"], "suppressed_by_plc_logic")
+
+        # Must NOT have bogus 'connected_to 12.4_bar' edge
+        if kg.graph.has_edge("pt-4012", "12.4_bar"):
+            for edge_attr in kg.graph.get_edge_data("pt-4012", "12.4_bar").values():
+                self.assertNotEqual(edge_attr.get("relation"), "connected_to")
+
+    def test_empty_source_file_fails_completeness(self):
+        import tempfile, shutil
+        temp_dir = tempfile.mkdtemp()
+        try:
+            # Create manifest with an empty file
+            empty_file = os.path.join(temp_dir, "empty_log.jsonl")
+            with open(empty_file, "w", encoding="utf-8") as f:
+                pass  # 0 bytes
+            manifest_content = {
+                "case_id": "TEST-EMPTY-001",
+                "title": "Empty File Test",
+                "evidence_sources": {
+                    "test_zone": ["empty_log.jsonl"]
+                }
+            }
+            manifest_path = os.path.join(temp_dir, "case_manifest.json")
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest_content, f)
+
+            loader = CaseLoader(temp_dir)
+            kg = loader.load_case()
+            self.assertFalse(kg.ingestion_report.is_complete)
+            self.assertIn("empty_log.jsonl", kg.ingestion_report.empty_sources)
+            self.assertIsNotNone(kg.ingestion_report.degraded_reason)
+            self.assertIn("Empty sources", kg.ingestion_report.degraded_reason)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_separated_ingestion_report_metrics(self):
+        import os
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        rep = kg.ingestion_report
+        self.assertIsNotNone(rep)
+        self.assertGreater(rep.source_records_read, 0)
+        self.assertGreater(rep.source_records_parsed, 0)
+        self.assertEqual(rep.source_records_rejected, 0)
+        self.assertGreater(rep.normalized_events_generated, 0)
+        self.assertGreater(rep.atomic_facts_generated, 0)
+        self.assertGreater(rep.graph_edges_generated, 0)
+        # Property aliases for backward compatibility
+        self.assertEqual(rep.facts_produced, rep.atomic_facts_generated)
+        self.assertEqual(rep.edges_produced, rep.graph_edges_generated)
+        self.assertEqual(rep.records_read, rep.source_records_read)
+        self.assertEqual(rep.records_parsed, rep.source_records_parsed)
 
 
 if __name__ == "__main__":

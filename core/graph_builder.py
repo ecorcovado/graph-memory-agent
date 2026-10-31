@@ -26,6 +26,7 @@ OBSERVED_PREDICATES = {
     "communicated_with", "connected_to", "executed", "created", "dropped_file",
     "modified_registry", "logged_into", "downloaded", "established_beacon",
     "modified_logic", "sent_command", "authenticated_to", "scanned",
+    "has_observation", "measured_value", "commanded_state", "actual_state", "interlock_status",
 }
 
 INTELLIGENCE_PREDICATES = {
@@ -53,7 +54,8 @@ VALID_EVIDENCE_BASES = {
 
 TRUSTED_TELEMETRY_SOURCES = {
     "SYSMON_EVENT", "WINDOWS_SECURITY", "FIREWALL_LOG",
-    "SCADA_AUDIT", "CONTROLLER_AUDIT", "PROCESS_TELEMETRY", "ZEEK_FLOW"
+    "HISTORIAN_MIRROR", "HISTORIAN_AUDIT", "SCADA_AUDIT",
+    "CONTROLLER_AUDIT", "PROCESS_TELEMETRY", "ZEEK_FLOW"
 }
 
 

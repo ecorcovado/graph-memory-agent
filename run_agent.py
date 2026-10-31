@@ -45,6 +45,16 @@ def main():
             loader = CaseLoader(args.case)
             print("\n[Phase 1] Ingesting Structured Case Bundle...")
             kg = loader.load_case()
+            if kg.ingestion_report and not kg.ingestion_report.is_complete:
+                print("\n" + "!" * 70)
+                print("  [!] WARNING: CASE INGESTION IS INCOMPLETE OR DEGRADED")
+                print(f"  Reason: {kg.ingestion_report.degraded_reason or 'Missing or rejected sources'}")
+                if kg.ingestion_report.missing_sources:
+                    print(f"  Missing sources: {', '.join(kg.ingestion_report.missing_sources)}")
+                if kg.ingestion_report.empty_sources:
+                    print(f"  Empty sources: {', '.join(kg.ingestion_report.empty_sources)}")
+                print("  Proceeding under degraded mode: conclusions requiring missing sources will fail closed.")
+                print("!" * 70 + "\n")
         except Exception as e:
             print(f"[!] Error loading case '{args.case}': {e}")
             sys.exit(1)

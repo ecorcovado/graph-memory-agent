@@ -283,7 +283,7 @@ class GraphReaderAgent:
             instructions=(
                 "Instructions:\n"
                 "1. Check if the gathered evidence contains a definitive, unbroken logical chain connecting the entities in the question.\n"
-                "2. Cite the exact Fact IDs (e.g. C0_F1) supporting each link in the chain.\n"
+                "2. Cite the exact Fact IDs supporting each link in the chain (choose strictly from the Verified Immutable Fact IDs listed above).\n"
                 "3. If evidence is missing, inconclusive, or unsupported, explicitly state: 'INSUFFICIENT EVIDENCE: [explain missing link]'.\n"
                 "4. If evidence is sufficient, provide the concise evidence chain with cited Fact IDs and the final direct answer.\n"
                 "Answer:"
@@ -291,9 +291,40 @@ class GraphReaderAgent:
         )
         answer = self.llm.generate(prompt=prompt, system=sys_prompt, temperature=0.1)
 
-        # Deterministic Evidence Verification Check (Fail-Closed, supports hash-prefixed and ordinal IDs)
-        cited_fact_ids = set(re.findall(r"\b([a-f0-9]+_C\d+_F\d+|C\d+_F\d+)\b", answer))
-        invalid_citations = cited_fact_ids - verified_fact_ids
+        # 1. Exact Set Membership against verified immutable fact registry
+        cited_fact_ids = {fid for fid in verified_fact_ids if fid in answer}
+
+        # 2. Support structured JSON output if provided
+        json_cited = set()
+        if "cited_fact_ids" in answer:
+            try:
+                json_match = re.search(r"\{.*\}", answer, re.DOTALL)
+                if json_match:
+                    parsed_json = json.loads(json_match.group(0))
+                    for item in parsed_json.get("cited_fact_ids", []):
+                        if isinstance(item, str):
+                            json_cited.add(item.strip())
+            except Exception:
+                pass
+        cited_fact_ids.update(json_cited.intersection(verified_fact_ids))
+
+        # 3. Detect fabricated or unverified Fact IDs cited in the answer
+        candidate_patterns = [
+            r"\b[a-f0-9]{8,64}_R\d+_[A-Za-z0-9_]+\b",
+            r"\b[a-f0-9]{8,64}_C\d+_F\d+\b",
+            r"\bC\d+_F\d+\b",
+            r"\bFACT_[A-Za-z0-9_]+\b",
+        ]
+        candidate_ids = set()
+        for pat in candidate_patterns:
+            for match in re.findall(pat, answer):
+                candidate_ids.add(match)
+        candidate_ids.update(json_cited)
+
+        invalid_citations = {
+            cid for cid in candidate_ids
+            if cid not in verified_fact_ids
+        }
 
         if invalid_citations:
             self._log("EVIDENCE VERIFICATION FAILED", f"Answer cited unverified or fabricated Fact IDs: {invalid_citations}")

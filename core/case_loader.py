@@ -42,14 +42,37 @@ class IngestionReport:
     case_id: str
     files_discovered: int
     files_processed: int
-    records_read: int
-    records_parsed: int
-    records_rejected: int
+    source_records_read: int
+    source_records_parsed: int
+    source_records_rejected: int
+    normalized_events_generated: int
+    atomic_facts_generated: int
+    graph_edges_generated: int
     missing_sources: List[str]
     source_hashes: Dict[str, str]
-    facts_produced: int
-    edges_produced: int
     is_complete: bool
+    empty_sources: List[str] = field(default_factory=list)
+    degraded_reason: Optional[str] = None
+
+    @property
+    def facts_produced(self) -> int:
+        return self.atomic_facts_generated
+
+    @property
+    def edges_produced(self) -> int:
+        return self.graph_edges_generated
+
+    @property
+    def records_read(self) -> int:
+        return self.source_records_read
+
+    @property
+    def records_parsed(self) -> int:
+        return self.source_records_parsed
+
+    @property
+    def records_rejected(self) -> int:
+        return self.source_records_rejected
 
 
 class StructuredLogParser:
@@ -397,25 +420,51 @@ class StructuredLogParser:
             desc = data.get("description", "")
             pressure = data.get("value_bar")
             interlock = data.get("interlock_status")
+            cmd_state = data.get("commanded_state")
+            act_state = data.get("actual_state")
 
             if pressure is not None:
+                obs_id = f"obs-{tag}-001" if tag else f"obs-pressure-{line_idx:03d}"
+                # 1. tag -> has_observation -> obs_id
                 events.append(
                     NormalizedEvent(
                         source_id=source_id,
-                        record_id=f"process_pressure_{line_idx}",
+                        record_id=f"process_obs_{line_idx}",
                         source_type=source_type,
                         event_time=event_time,
                         ingested_at=ingested_at,
-                        event_type="PRESSURE_TELEMETRY",
+                        event_type="PROCESS_OBSERVATION",
                         subject=tag,
-                        predicate="connected_to",
-                        object_entity="12.4_bar",
+                        predicate="has_observation",
+                        object_entity=obs_id,
                         raw_record=raw,
                         source_location=f"{file_rel}:L{line_idx}",
                         evidence_basis=assigned_basis,
                         purdue_level=0.0,
                         attributes={
                             "description": desc,
+                            "normal_range": data.get("normal_range", ""),
+                        },
+                    )
+                )
+                # 2. obs_id -> measured_value -> f"{pressure}_bar"
+                pressure_val = f"{pressure}_bar"
+                events.append(
+                    NormalizedEvent(
+                        source_id=source_id,
+                        record_id=f"process_measurement_{line_idx}",
+                        source_type=source_type,
+                        event_time=event_time,
+                        ingested_at=ingested_at,
+                        event_type="PRESSURE_MEASUREMENT",
+                        subject=obs_id,
+                        predicate="measured_value",
+                        object_entity=normalize_entity(pressure_val),
+                        raw_record=raw,
+                        source_location=f"{file_rel}:L{line_idx}",
+                        evidence_basis=assigned_basis,
+                        purdue_level=0.0,
+                        attributes={
                             "value_bar": pressure,
                             "high_alarm_threshold": data.get("high_alarm_threshold"),
                             "trip_state": data.get("trip_state"),
@@ -423,30 +472,84 @@ class StructuredLogParser:
                     )
                 )
 
-            if interlock:
+            if interlock or cmd_state or act_state:
+                obs_valve_id = f"obs-{tag}-001" if tag else f"obs-valve-{line_idx:03d}"
+                # 1. tag -> has_observation -> obs_valve_id
                 events.append(
                     NormalizedEvent(
                         source_id=source_id,
-                        record_id=f"process_valve_{line_idx}",
+                        record_id=f"process_valve_obs_{line_idx}",
                         source_type=source_type,
                         event_time=event_time,
                         ingested_at=ingested_at,
-                        event_type="VALVE_STATE_TELEMETRY",
+                        event_type="VALVE_OBSERVATION",
                         subject=tag,
-                        predicate="connected_to",
-                        object_entity="plc-ballast-01",
+                        predicate="has_observation",
+                        object_entity=obs_valve_id,
                         raw_record=raw,
                         source_location=f"{file_rel}:L{line_idx}",
                         evidence_basis=assigned_basis,
                         purdue_level=0.0,
-                        attributes={
-                            "description": desc,
-                            "commanded_state": data.get("commanded_state"),
-                            "actual_state": data.get("actual_state"),
-                            "interlock_status": interlock,
-                        },
+                        attributes={"description": desc},
                     )
                 )
+                if cmd_state:
+                    events.append(
+                        NormalizedEvent(
+                            source_id=source_id,
+                            record_id=f"process_cmd_{line_idx}",
+                            source_type=source_type,
+                            event_time=event_time,
+                            ingested_at=ingested_at,
+                            event_type="COMMANDED_STATE",
+                            subject=obs_valve_id,
+                            predicate="commanded_state",
+                            object_entity=normalize_entity(cmd_state),
+                            raw_record=raw,
+                            source_location=f"{file_rel}:L{line_idx}",
+                            evidence_basis=assigned_basis,
+                            purdue_level=0.0,
+                            attributes={"commanded_state": cmd_state},
+                        )
+                    )
+                if act_state:
+                    events.append(
+                        NormalizedEvent(
+                            source_id=source_id,
+                            record_id=f"process_act_{line_idx}",
+                            source_type=source_type,
+                            event_time=event_time,
+                            ingested_at=ingested_at,
+                            event_type="ACTUAL_STATE",
+                            subject=obs_valve_id,
+                            predicate="actual_state",
+                            object_entity=normalize_entity(act_state),
+                            raw_record=raw,
+                            source_location=f"{file_rel}:L{line_idx}",
+                            evidence_basis=assigned_basis,
+                            purdue_level=0.0,
+                            attributes={"actual_state": act_state},
+                        )
+                    )
+                if interlock:
+                    events.append(
+                        NormalizedEvent(
+                            source_id=source_id,
+                            record_id=f"process_int_{line_idx}",
+                            source_type=source_type,
+                            event_time=event_time,
+                            ingested_at=ingested_at,
+                            event_type="INTERLOCK_STATUS",
+                            subject=obs_valve_id,
+                            predicate="interlock_status",
+                            object_entity=normalize_entity(interlock),
+                            raw_record=raw,
+                            source_location=f"{file_rel}:L{line_idx}",
+                            evidence_basis=assigned_basis,
+                            purdue_level=0.0,
+                            attributes={"interlock_status": interlock},
+                        )
+                    )
 
         return events
 
@@ -490,10 +593,11 @@ class CaseLoader:
 
         files_discovered = 0
         files_processed = 0
-        records_read = 0
-        records_parsed = 0
-        records_rejected = 0
+        source_records_read = 0
+        source_records_parsed = 0
+        source_records_rejected = 0
         missing_sources: List[str] = []
+        empty_sources: List[str] = []
 
         print(f"[*] Ingesting Case: {self.manifest.get('title')} ({self.manifest.get('case_id')})")
         evidence_sources = self.manifest.get("evidence_sources", {})
@@ -519,7 +623,7 @@ class CaseLoader:
                     missing_sources.append(rel_file)
                     continue
 
-                # 1. Compute full SHA-256 digest of original bytes
+                # 1. Compute full SHA-256 digest from byte snapshot
                 with open(abs_file, "rb") as bf:
                     file_bytes = bf.read()
                 full_sha = hashlib.sha256(file_bytes).hexdigest()
@@ -530,33 +634,36 @@ class CaseLoader:
                 # 2. Determine source type
                 source_type = self.SOURCE_TYPE_MAPPING.get(file_name, "UNCLASSIFIED")
 
-                # 3. Read and parse line by line
-                with open(abs_file, "r", encoding="utf-8") as tf:
-                    for line_idx, line in enumerate(tf, 1):
-                        records_read += 1
-                        line_str = line.strip()
-                        if not line_str:
-                            continue
-                        try:
-                            record = json.loads(line_str)
-                            events = StructuredLogParser.parse_line(
-                                record,
-                                source_id=source_id,
-                                source_type=source_type,
-                                file_rel=rel_file,
-                                line_idx=line_idx,
-                            )
-                            if events:
-                                records_parsed += len(events)
-                                all_events.extend(events)
-                                # Store raw record in vault
-                                for ev in events:
-                                    kg.raw_record_vault[(ev.source_id, ev.record_id)] = record
-                            else:
-                                records_rejected += 1
-                        except json.JSONDecodeError:
-                            records_rejected += 1
-                            continue
+                # 3. Parse directly from the hashed byte snapshot (Byte-Preserving Ingestion)
+                file_text = file_bytes.decode("utf-8", errors="replace")
+                raw_lines = [l.strip() for l in file_text.splitlines() if l.strip()]
+
+                if not raw_lines:
+                    print(f"    [WARN] Empty source file detected: {rel_file}")
+                    empty_sources.append(rel_file)
+
+                for line_idx, line_str in enumerate(raw_lines, 1):
+                    source_records_read += 1
+                    try:
+                        record = json.loads(line_str)
+                        events = StructuredLogParser.parse_line(
+                            record,
+                            source_id=source_id,
+                            source_type=source_type,
+                            file_rel=rel_file,
+                            line_idx=line_idx,
+                        )
+                        if events:
+                            source_records_parsed += 1
+                            all_events.extend(events)
+                            # Store raw record in vault
+                            for ev in events:
+                                kg.raw_record_vault[(ev.source_id, ev.record_id)] = record
+                        else:
+                            source_records_rejected += 1
+                    except json.JSONDecodeError:
+                        source_records_rejected += 1
+                        continue
 
         print(f"    [+] Normalized {len(all_events)} structured telemetry events across Purdue zones.")
 
@@ -625,19 +732,33 @@ class CaseLoader:
                 )
 
         # 5. Compile Ingestion Completeness Report
-        is_complete = len(missing_sources) == 0 and records_rejected == 0
+        is_complete = (len(missing_sources) == 0 and len(empty_sources) == 0 and source_records_rejected == 0)
+        degraded_reason = None
+        if not is_complete:
+            reasons = []
+            if missing_sources:
+                reasons.append(f"Missing sources: {missing_sources}")
+            if empty_sources:
+                reasons.append(f"Empty sources: {empty_sources}")
+            if source_records_rejected > 0:
+                reasons.append(f"Rejected records: {source_records_rejected}")
+            degraded_reason = "; ".join(reasons)
+
         report = IngestionReport(
             case_id=self.manifest.get("case_id", "UNKNOWN"),
             files_discovered=files_discovered,
             files_processed=files_processed,
-            records_read=records_read,
-            records_parsed=records_parsed,
-            records_rejected=records_rejected,
+            source_records_read=source_records_read,
+            source_records_parsed=source_records_parsed,
+            source_records_rejected=source_records_rejected,
+            normalized_events_generated=len(all_events),
+            atomic_facts_generated=len(kg.atomic_facts),
+            graph_edges_generated=kg.graph.number_of_edges(),
             missing_sources=missing_sources,
             source_hashes=dict(kg.source_hashes),
-            facts_produced=len(kg.atomic_facts),
-            edges_produced=kg.graph.number_of_edges(),
             is_complete=is_complete,
+            empty_sources=empty_sources,
+            degraded_reason=degraded_reason,
         )
         kg.ingestion_report = report
 
