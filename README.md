@@ -54,12 +54,12 @@ This project runs **100% locally** via Ollama. It extracts a directed `MultiDiGr
 
 ## Key Technical Guardrails
 
-* **Directed MultiDiGraph with Strict Forensic Tiers:** Distinguishes relationship directions (`Host -> communicated_with -> IP` vs reverse) and enforces strict allowlists for forensic classifications: `OBSERVED` (endpoint events), `INTELLIGENCE_REPORTED` (threat intelligence attribution), `CO_OCCURRENCE`, or `UNCLASSIFIED` (unrecognized predicates never default to observed).
-* **Centralized Prompt Budget Assembler:** All LLM prompts pass through `PromptBudgetManager.assemble_prompt()` to strictly allocate context budgets (system instructions: 400t, query/plan: 300t, notebook: 1,000t, context: 1,500t, output reserve: 500t) and clamp candidate nodes to guarantee requests never exceed 4,096 tokens.
-* **Bounded Provenance Memory (`EvidenceNote`):** Enforces a 1,000-token budget with immutable `frozen=True` dataclasses, tuple-based `fact_ids`, source excerpts, per-note clamping, deduplication, and FIFO eviction.
-* **Explicit Context Limit:** Passes `"options": {"num_ctx": 4096}` directly to the Ollama API.
-* **Resilient Node Selection & Forensic Routing:** Avoids blind fallbacks using query keyword overlap and hub-degree centrality. Rejects invalid hop targets and routes fallback hops by forensic edge tier (`OBSERVED` prioritized over `CO_OCCURRENCE`).
-* **Deterministic Evidence Verification:** Synthesized answers are audited against the notebook's verified fact IDs. If the model cites unverified fact IDs, an automated forensic audit warning is appended.
+* **Directed MultiDiGraph with Strict Forensic Tiers:** Distinguishes relationship directions (`Host -> communicated_with -> IP` vs reverse) and enforces strict exact allowlists for forensic classifications (`OBSERVED`, `INTELLIGENCE_REPORTED`, `CO_OCCURRENCE`). Substrings like `not_executed` strictly default to `UNCLASSIFIED`, and unannotated edges are never presumed observed.
+* **Centralized Prompt Budget Assembler:** 100% of LLM calls (including fact extraction) pass through `PromptBudgetManager.assemble_prompt()` to strictly allocate context budgets (system instructions: 400t, query/plan: 300t, notebook: 1,000t, context: 1,300t, instructions: 200t, output reserve: 500t) and clamp candidate nodes to guarantee requests never exceed 4,096 tokens.
+* **Bounded Provenance Memory (`EvidenceNote`):** Enforces a 1,000-token budget with immutable `frozen=True` dataclasses, tuple-based `fact_ids`, source excerpts, per-note clamping, FIFO eviction, and **provenance-preserving deduplication** (merging fact IDs from multiple sources rather than discarding them).
+* **Explicit Context & Output Limits:** Passes `"options": {"num_ctx": 4096, "num_predict": 500}` directly to the Ollama API.
+* **Resilient Node Selection & Forensic Routing:** Disallows ambiguous substring target matching and loops to already visited nodes. Routes fallback hops by forensic edge tier (`OBSERVED` prioritized over `CO_OCCURRENCE`).
+* **Deterministic Fail-Closed Evidence Verification:** Synthesized answers are audited against verified fact IDs. If the model cites fabricated fact IDs or provides uncited claims, the system **fails closed** and returns `INSUFFICIENT EVIDENCE`.
 
 ---
 
@@ -151,7 +151,7 @@ graph-memory-agent/
 ├── examples/
 │   └── cyber_incident_report.txt # DFIR incident triage scenario
 ├── tests/
-│   └── test_components.py # 10 offline unit tests (assembly, edge allowlists, verification, fallbacks)
+│   └── test_components.py # 12 offline unit tests (fail-closed auditing, allowlists, deduplication, assembly)
 ├── run_agent.py           # CLI entry point
 └── README.md
 ```

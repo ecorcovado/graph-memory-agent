@@ -22,7 +22,8 @@ class PromptBudgetManager:
         "system": 400,
         "query_and_plan": 300,
         "notebook": 1000,
-        "retrieved_context": 1500,
+        "retrieved_context": 1300,
+        "instructions": 200,
     }
 
     @staticmethod
@@ -34,11 +35,13 @@ class PromptBudgetManager:
 
     @staticmethod
     def clamp_text(text: str, max_tokens: int) -> str:
-        """Truncates text safely if it exceeds component token budget."""
+        """Truncates text safely so text PLUS the truncation marker strictly does not exceed max_tokens."""
         max_chars = max_tokens * 4
         if len(text) <= max_chars:
             return text
-        return text[:max_chars] + "\n... [TRUNCATED TO FIT CONTEXT BUDGET]"
+        marker = "\n... [TRUNCATED]"
+        cut_len = max(0, max_chars - len(marker))
+        return text[:cut_len] + marker
 
     @staticmethod
     def clamp_node_list(nodes: List[str], max_tokens: int = 300) -> List[str]:
@@ -74,6 +77,7 @@ class PromptBudgetManager:
         clamped_query = cls.clamp_text(query_and_plan, cls.ALLOCATIONS["query_and_plan"])
         clamped_nb = cls.clamp_text(notebook_text, cls.ALLOCATIONS["notebook"])
         clamped_ctx = cls.clamp_text(context_text, cls.ALLOCATIONS["retrieved_context"])
+        clamped_inst = cls.clamp_text(instructions, cls.ALLOCATIONS["instructions"])
 
         user_prompt_sections = []
         if clamped_query:
@@ -82,8 +86,8 @@ class PromptBudgetManager:
             user_prompt_sections.append(f"Recorded Evidence Memory:\n{clamped_nb}")
         if clamped_ctx:
             user_prompt_sections.append(f"Retrieved Context:\n{clamped_ctx}")
-        if instructions:
-            user_prompt_sections.append(instructions)
+        if clamped_inst:
+            user_prompt_sections.append(clamped_inst)
 
         user_prompt = "\n\n".join(user_prompt_sections)
         total_tokens = cls.estimate_tokens(clamped_system) + cls.estimate_tokens(user_prompt)

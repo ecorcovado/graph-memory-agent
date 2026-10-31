@@ -56,13 +56,24 @@ class Notebook:
         # Clamp individual note length to prevent a single oversized LLM output from overflowing
         clamped_content = PromptBudgetManager.clamp_text(content, self.max_single_note_tokens)
         clamped_excerpt = PromptBudgetManager.clamp_text(source_excerpt, 150)
-
-        # Deduplication check
-        for n in self.notes:
-            if clamped_content.lower() == n.content.lower():
-                return
-
         immutable_fact_ids = tuple(sorted(set(fact_ids))) if fact_ids else ()
+
+        # Provenance-preserving deduplication:
+        # If content matches an existing note, merge the fact IDs and source references rather than discarding!
+        for idx, n in enumerate(self.notes):
+            if clamped_content.lower() == n.content.lower():
+                merged_ids = tuple(sorted(set(n.fact_ids + immutable_fact_ids)))
+                merged_excerpt = n.source_excerpt or clamped_excerpt
+                self.notes[idx] = EvidenceNote(
+                    step=n.step,
+                    source_node=n.source_node,
+                    fact_ids=merged_ids,
+                    source_excerpt=merged_excerpt,
+                    content=n.content,
+                    confidence=max(n.confidence, confidence),
+                )
+                self._enforce_budget()
+                return
 
         note = EvidenceNote(
             step=step,

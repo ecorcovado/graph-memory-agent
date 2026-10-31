@@ -214,10 +214,15 @@ class GraphReaderAgent:
         match = re.search(r"(?:HOP\s*\|\s*|HOP:\s*|HOP\s+TO\s+)(.+)", decision, re.IGNORECASE)
         target = match.group(1).strip().lower() if match else decision.strip().lower()
 
-        # Validate target against actual graph neighbors
-        for n in all_neighbors:
-            if n == target or n in target or target in n:
-                return n, False
+        # Strict exact match against unvisited neighbors (disallows ambiguous substrings or visited loops)
+        if target in unvisited_neighbors:
+            return target, False
+
+        if target in visited:
+            self._log(
+                f"STEP {step}: TRAVERSAL SAFEGUARD",
+                f"Target '{target}' was already visited. Selecting unvisited neighbor via ranked routing.",
+            )
 
         # Action Validation Safeguard: Rank unvisited neighbors by forensic relevance instead of guessing arbitrarily
         ranked_unvisited = self.rank_candidate_neighbors(current_node, unvisited_neighbors, question)
@@ -225,7 +230,7 @@ class GraphReaderAgent:
             chosen = ranked_unvisited[0]
             self._log(
                 f"STEP {step}: ACTION VALIDATION ROUTING",
-                f"Target '{target}' is not an adjacent node. Ranked routing to '{chosen}' (tier/relevance priority)",
+                f"Target '{target}' invalid or unranked. Ranked routing to '{chosen}' (tier/relevance priority)",
             )
             return chosen, False
 
@@ -235,7 +240,7 @@ class GraphReaderAgent:
     def synthesize_answer(self, question: str) -> str:
         """
         Step 4: Compiles all recorded notes, performs deterministic evidence verification,
-        validates cited fact IDs against immutable notebook facts, and reasons the final answer.
+        validates cited fact IDs against immutable notebook facts, and fails closed if evidence is missing.
         """
         if self.notebook.is_empty():
             return "INSUFFICIENT EVIDENCE: No relevant clues were gathered during graph traversal."
@@ -259,17 +264,25 @@ class GraphReaderAgent:
         )
         answer = self.llm.generate(prompt=prompt, system=sys_prompt, temperature=0.1)
 
-        # Deterministic Evidence Verification Check
+        # Deterministic Evidence Verification Check (Fail-Closed)
         cited_fact_ids = set(re.findall(r"\b(C\d+_F\d+)\b", answer))
         invalid_citations = cited_fact_ids - verified_fact_ids
 
         if invalid_citations:
-            self._log("EVIDENCE VERIFICATION WARNING", f"Answer cited unverified Fact IDs: {invalid_citations}")
-            verification_notice = f"\n\n[FORENSIC AUDIT: Warning - Answer cited unverified fact IDs: {', '.join(invalid_citations)}]"
-            answer += verification_notice
-        elif cited_fact_ids:
-            self._log("EVIDENCE VERIFIED", f"All cited Fact IDs verified against notebook: {cited_fact_ids}")
+            self._log("EVIDENCE VERIFICATION FAILED", f"Answer cited unverified or fabricated Fact IDs: {invalid_citations}")
+            return (
+                f"INSUFFICIENT EVIDENCE: The investigation failed deterministic evidence validation. "
+                f"The generated answer cited unverified fact IDs: {', '.join(sorted(invalid_citations))}"
+            )
 
+        if not cited_fact_ids and "insufficient evidence" not in answer.lower():
+            self._log("EVIDENCE VERIFICATION FAILED", "Answer contained no citations to verified atomic facts.")
+            return (
+                "INSUFFICIENT EVIDENCE: The generated answer failed forensic validation because it contained "
+                "no verifiable citations to atomic fact IDs."
+            )
+
+        self._log("EVIDENCE VERIFIED", f"All cited Fact IDs verified against notebook: {cited_fact_ids}")
         self._log("FINAL ANSWER", answer)
         return answer
 

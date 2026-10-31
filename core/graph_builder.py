@@ -10,6 +10,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 import networkx as nx
+from core.budget_manager import PromptBudgetManager
 
 
 def normalize_entity(name: str) -> str:
@@ -34,18 +35,18 @@ INTELLIGENCE_PREDICATES = {
 
 def classify_relation(relation: str) -> str:
     """
-    Classifies edge relations into strict forensic tiers:
+    Classifies edge relations into strict forensic tiers via exact allowlist matching:
     - OBSERVED: Direct physical/endpoint/network events on strict allowlist.
-    - INTELLIGENCE_REPORTED: CTI attributions and TTP mappings on allowlist.
+    - INTELLIGENCE_REPORTED: CTI attributions and TTP mappings on strict allowlist.
     - CO_OCCURRENCE: Explicit secondary entity mentions.
-    - UNCLASSIFIED: Any unrecognized or ambiguous predicate (never assumed OBSERVED).
+    - UNCLASSIFIED: Any unrecognized or ambiguous predicate (strictly never assumed OBSERVED).
     """
     rel = relation.lower().strip().replace(" ", "_")
     if rel in ["co_occurs_with", "co_occurs", "related_to"]:
         return "CO_OCCURRENCE"
-    if rel in OBSERVED_PREDICATES or any(p in rel for p in ["communicat", "execut", "connect", "drop", "regist"]):
+    if rel in OBSERVED_PREDICATES:
         return "OBSERVED"
-    if rel in INTELLIGENCE_PREDICATES or any(p in rel for p in ["attribut", "intel", "persist"]):
+    if rel in INTELLIGENCE_PREDICATES:
         return "INTELLIGENCE_REPORTED"
     return "UNCLASSIFIED"
 
@@ -81,13 +82,13 @@ class KnowledgeGraph:
         # Outgoing edges: node -> target
         for _, target, data in self.graph.out_edges(node, data=True):
             rel = data.get("relation", "connected_to")
-            cls = data.get("classification", "OBSERVED")
+            cls = data.get("classification", "UNCLASSIFIED")
             results.append(("outgoing", rel, cls, target))
 
         # Incoming edges: source -> node
         for source, _, data in self.graph.in_edges(node, data=True):
             rel = data.get("relation", "connected_to")
-            cls = data.get("classification", "OBSERVED")
+            cls = data.get("classification", "UNCLASSIFIED")
             results.append(("incoming", rel, cls, source))
 
         return results
@@ -115,10 +116,12 @@ class LocalOllamaClient:
         model: str = "qwen2.5-coder:7b",
         base_url: str = "http://localhost:11434",
         num_ctx: int = 4096,
+        num_predict: int = 500,
     ):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.num_ctx = num_ctx
+        self.num_predict = num_predict
 
     def generate(self, prompt: str, temperature: float = 0.1, system: str = "") -> str:
         url = f"{self.base_url}/api/generate"
@@ -129,6 +132,7 @@ class LocalOllamaClient:
             "options": {
                 "temperature": temperature,
                 "num_ctx": self.num_ctx,  # Enforces strict 4K context budget
+                "num_predict": self.num_predict,  # Enforces generation output budget
             },
         }
         if system:
@@ -200,8 +204,12 @@ class GraphBuilder:
             "- Output only pipe-separated lines. No markdown headers."
         )
 
-        prompt = f"Text:\n\"\"\"\n{chunk}\n\"\"\"\n\nExtracted Facts:"
-        raw_output = self.llm.generate(prompt=prompt, system=system_prompt, temperature=0.1)
+        sys_prompt, user_prompt, _ = PromptBudgetManager.assemble_prompt(
+            system_text=system_prompt,
+            context_text=f"Text to Deconstruct:\n\"\"\"\n{chunk}\n\"\"\"",
+            instructions="Extracted Facts (pipe-separated lines only):",
+        )
+        raw_output = self.llm.generate(prompt=user_prompt, system=sys_prompt, temperature=0.1)
 
         extracted_facts = []
         lines = raw_output.split("\n")
