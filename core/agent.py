@@ -345,14 +345,22 @@ class GraphReaderAgent:
 
             if "plc" in q_lower and any(w in q_lower for w in ["modif", "compromis", "reach", "logic", "attack", "controller"]):
                 req_sources.add("CONTROLLER_AUDIT")
-                req_preds.add("modified_logic")
+                ctrl_preds = [p for p in manifest_targets.get("required_predicates", []) if p in ["modified_logic", "polled_controller", "firmware_update"]]
+                if ctrl_preds:
+                    req_preds.update(ctrl_preds)
+                else:
+                    req_preds.add("modified_logic")
                 claims.append("PLC logic modification")
                 ctrl_match = re.search(r"plc-[\w-]+", q_lower)
                 exp_ctrl = ctrl_match.group(0) if ctrl_match else default_ctrl
 
             if any(w in q_lower for w in ["pressure", "valve", "dump", "interlock", "safety", "bypass"]):
                 req_sources.add("PROCESS_TELEMETRY")
-                req_preds.add("interlock_status")
+                act_preds = [p for p in manifest_targets.get("required_predicates", []) if p in ["interlock_status", "commanded_state", "measured_value", "has_observation"]]
+                if act_preds:
+                    req_preds.update(act_preds)
+                else:
+                    req_preds.add("interlock_status")
                 claims.append("Physical process interlock telemetry")
                 act_match = re.search(r"[a-z]{2}-\d{4}", q_lower)
                 exp_act = act_match.group(0) if act_match else default_act
@@ -362,8 +370,8 @@ class GraphReaderAgent:
                     required_source_types=req_sources,
                     required_predicates=req_preds,
                     target_claim=" and ".join(claims),
-                    expected_controller=exp_ctrl,
-                    expected_actuator=exp_act,
+                    expected_controller=exp_ctrl or default_ctrl,
+                    expected_actuator=exp_act or default_act,
                 )
 
         if requirements and hasattr(self.kg, "ingestion_report") and self.kg.ingestion_report:
@@ -487,12 +495,10 @@ class GraphReaderAgent:
         expected_target_ctrl = (
             (requirements.expected_controller if requirements else None)
             or default_ctrl
-            or "plc-ballast-01"
         )
         expected_target_act = (
             (requirements.expected_actuator if requirements else None)
             or default_act
-            or "xv-4012"
         )
 
         # A. Validate Structured Claims if present
@@ -502,6 +508,12 @@ class GraphReaderAgent:
                 c_fids = claim.get("fact_ids", [])
                 claim_facts = [self.kg.atomic_facts.get(fid) for fid in c_fids if fid in self.kg.atomic_facts]
                 if ("plc" in stmt or "logic" in stmt or "controller" in stmt) and "modif" in stmt:
+                    if not expected_target_ctrl:
+                        self._log("CLAIM VALIDATION FAILED", "Structured claim asserts controller modification, but no target controller was specified in query or case manifest.")
+                        return (
+                            "INSUFFICIENT EVIDENCE: Structured claim asserts controller logic modification, but no target "
+                            "controller was defined in query or case manifest."
+                        )
                     has_exact_target = any(
                         f.relation == "modified_logic"
                         and f.source_type == "CONTROLLER_AUDIT"
@@ -520,6 +532,12 @@ class GraphReaderAgent:
         if "insufficient evidence" not in ans_lower:
             # If answer asserts PLC modification or download
             if ("plc" in ans_lower or "controller" in ans_lower) and any(w in ans_lower for w in ["modif", "download", "logic"]):
+                if not expected_target_ctrl:
+                    self._log("CLAIM VALIDATION FAILED", "Answer asserts controller modification, but no target controller was specified in query or case manifest.")
+                    return (
+                        "INSUFFICIENT EVIDENCE: Answer asserts controller logic modification, but no target controller "
+                        "was defined in query or case manifest."
+                    )
                 # Expected target controller is strictly bound to requirements/question, not what the answer claims!
                 claimed_ctrls = set(re.findall(r"plc-[\w-]+", ans_lower))
                 if claimed_ctrls and expected_target_ctrl not in claimed_ctrls:
@@ -544,6 +562,12 @@ class GraphReaderAgent:
 
             # If answer asserts safety interlock suppression / bypass
             if "interlock" in ans_lower and any(w in ans_lower for w in ["bypass", "suppress", "inhibit", "override", "disarm"]):
+                if not expected_target_act:
+                    self._log("CLAIM VALIDATION FAILED", "Answer asserts interlock bypass, but no target actuator was specified in query or case manifest.")
+                    return (
+                        "INSUFFICIENT EVIDENCE: Answer asserts safety interlock bypass, but no target actuator "
+                        "was defined in query or case manifest."
+                    )
                 claimed_tags = set(re.findall(r"[a-z]{2}-\d{4}", ans_lower))
                 if claimed_tags and expected_target_act not in claimed_tags:
                     self._log("CLAIM VALIDATION FAILED", f"Answer claims bypass on '{claimed_tags}', which does not substantiate expected actuator '{expected_target_act}'.")

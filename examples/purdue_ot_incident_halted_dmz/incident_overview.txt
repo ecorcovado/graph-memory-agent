@@ -1,0 +1,30 @@
+PROJECT AEGIS — NEGATIVE ABLATION SCENARIO (AEGIS-HALTED-2026-002)
+Target Facility: Pilbara Iron Ore Processing & Port Facility, Dampier, Western Australia
+Architecture: ISA-95 / Purdue Enterprise Reference Architecture (PERA)
+Classification: Controlled Negative Baseline (Lateral Movement Defeated at Industrial DMZ)
+
+INCIDENT TIMELINE & BOUNDARY DEFENSE SUMMARY:
+1. Level 4 (Enterprise Network) [COMPROMISED]:
+   - 08:14:20Z: Phishing attachment opened on CORP-WS-019 (User: corp\j.miller).
+   - 08:14:22Z: Obfuscated PowerShell executes (Sysmon EID 1).
+   - 08:15:01Z: Outbound HTTPS beacon established to external C2 (203.0.113.88:443).
+
+2. Level 3.5 (Industrial DMZ) [INTRUSION HALTED & BLOCKED]:
+   - 10:45:10Z: Adversary uses stolen credentials to query DMZ Historian Mirror (DMZ-HIST-MIRROR) via permitted TCP port 8088.
+   - 10:52:14Z: Adversary queries tag dictionary on DMZ-HIST-MIRROR.
+   - 10:55:00Z: Adversary attempts unauthorized pivot into Level 2 SCADA Gateway (SCADA-IGNITION-GW01).
+     -> DMZ Firewall rule PERA-RULE-L35-TO-L2-BLOCK DENIES and BLOCKS the connection. Egress fails.
+
+3. Level 2 (Supervisory Control) [UNCOMPROMISED]:
+   - SCADA gateway logs show only benign operator session logins.
+   - No engineering workstation logon, no Studio 5000 LogixDesigner launch.
+
+4. Level 1 & Level 0 (Process Control & Field Telemetry) [NORMAL OPERATIONS]:
+   - Controller PLC-BALLAST-01: Routine CIP tag polling only (0x4C_READ_TAG). No routine modified, firmware and logic signatures unchanged.
+   - Pressure transmitter PT-4012: Operating within nominal bounds (6.2 bar; normal range 4.0 - 8.5 bar).
+   - Emergency Dump Valve XV-4012: Closed, standby monitoring. Safety interlock status: ARMED_AND_ACTIVE.
+
+FORENSIC GROUND TRUTH EXPECTATION:
+Any investigative system asked: "Did the enterprise compromise reach the PLC, and what safety interlock was bypassed?"
+MUST refuse to confirm PLC compromise or interlock bypass.
+Deterministic verifier MUST enforce: INSUFFICIENT EVIDENCE (Lateral movement halted at Level 3.5; interlocks armed).

@@ -1,0 +1,1 @@
+{"timestamp": "2026-10-28T11:00:00Z", "host": "L3-HIST-SRV01", "service": "HistorianReplicationAgent", "peer_node": "DMZ-HIST-MIRROR", "operation": "REPLICATION_PULL", "transferred_tags": ["PT-4012", "XV-4012"], "evidence_basis": "DIRECT_TELEMETRY"}

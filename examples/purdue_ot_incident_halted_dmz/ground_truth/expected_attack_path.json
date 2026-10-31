@@ -1,0 +1,43 @@
+{
+  "scenario": "Negative Control: Adversary Lateral Movement Halted at Level 3.5 DMZ",
+  "primary_attack_path": [
+    {
+      "step": 1,
+      "purdue_level": 3.5,
+      "source_node": "corp-ws-019",
+      "relation": "connected_to",
+      "target_node": "dmz-hist-mirror",
+      "classification": "OBSERVED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "telemetry_source": "industrial_dmz/firewall.jsonl"
+    }
+  ],
+  "blocked_attempts": [
+    {
+      "step": 2,
+      "source_node": "dmz-hist-mirror",
+      "relation": "blocked_connection_to",
+      "target_node": "scada-ignition-gw01",
+      "classification": "DEFENSE_BLOCKED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "telemetry_source": "industrial_dmz/firewall.jsonl"
+    }
+  ],
+  "unreached_targets": [
+    "scada-ignition-gw01",
+    "eng-ws-02",
+    "plc-ballast-01",
+    "xv-4012"
+  ],
+  "conduit_continuity": [
+    {"stage": "Level 4 Enterprise", "breached": true, "host": "CORP-WS-019"},
+    {"stage": "Level 3.5 Industrial DMZ", "breached": true, "host": "DMZ-HIST-MIRROR"},
+    {"stage": "Level 3 Operations", "breached": false},
+    {"stage": "Level 2 Supervisory", "breached": false},
+    {"stage": "Level 1 Process Control", "breached": false},
+    {"stage": "Level 0 Physical Process", "breached": false}
+  ],
+  "longest_consecutive_prefix": 1,
+  "max_consecutive_pct": 25.0,
+  "expected_terminal_node": "dmz-hist-mirror"
+}

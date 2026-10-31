@@ -73,6 +73,34 @@ class FirewallAdapter(BaseLogAdapter):
                     },
                 )
             )
+        elif record.get("action") in ["BLOCK", "DENY"]:
+            src = normalize_entity(record.get("src_host", "") or record.get("src_ip", "") or record.get("client_ip", ""))
+            dst = normalize_entity(record.get("dst_host", "") or record.get("dst_ip", "") or record.get("target_host", ""))
+            rule_id = record.get("rule_id", "") or record.get("session_id", "")
+            events.append(
+                NormalizedEvent(
+                    source_id=source_id,
+                    record_id=f"gw_block_{line_idx}",
+                    source_type="FIREWALL_LOG",
+                    event_time=event_time,
+                    ingested_at=ingested_at,
+                    event_type="FIREWALL_BLOCK",
+                    subject=src,
+                    predicate="blocked_connection_to",
+                    object_entity=dst,
+                    raw_record=raw,
+                    source_location=f"{file_rel}:L{line_idx}",
+                    evidence_basis=evidence_basis,
+                    purdue_level=3.5,
+                    attributes={
+                        "rule_id": rule_id,
+                        "destination_port": record.get("dst_port", ""),
+                        "protocol": record.get("protocol", "TCP"),
+                        "source_zone": record.get("src_zone", ""),
+                        "destination_zone": record.get("dst_zone", ""),
+                    },
+                )
+            )
 
         return events
 
@@ -211,11 +239,15 @@ class ControllerAuditAdapter(BaseLogAdapter):
         events = []
         raw = json.dumps(record)
         src = normalize_entity(record.get("client_host", "") or record.get("client_ip", ""))
-        controller = normalize_entity(record.get("controller", "plc-ballast-01"))
+        controller = normalize_entity(record.get("controller", record.get("host", "unknown-controller")))
         routine = record.get("routine_modified", "")
         prior_sig = record.get("prior_signature", "")
         new_sig = record.get("new_signature", "")
         service = record.get("cip_service", "")
+
+        is_modify = bool(routine) or any(w in str(service).lower() for w in ["download", "modify", "write", "upload"])
+        pred = "modified_logic" if is_modify else "polled_controller"
+        ev_type = "CIP_PROGRAM_DOWNLOAD" if is_modify else "CIP_READ_STATUS"
 
         events.append(
             NormalizedEvent(
@@ -224,9 +256,9 @@ class ControllerAuditAdapter(BaseLogAdapter):
                 source_type="CONTROLLER_AUDIT",
                 event_time=event_time,
                 ingested_at=ingested_at,
-                event_type="CIP_PROGRAM_DOWNLOAD",
+                event_type=ev_type,
                 subject=src,
-                predicate="modified_logic",
+                predicate=pred,
                 object_entity=controller,
                 raw_record=raw,
                 source_location=f"{file_rel}:L{line_idx}",
@@ -408,12 +440,12 @@ class ProcessTelemetryAdapter(BaseLogAdapter):
                 )
                 if "PLC" in str(interlock).upper():
                     # Physical control link connecting Level 1 controller to Level 0 actuator
-                    ctrl_id = normalize_entity(
+                    ctrl_raw = (
                         record.get("controller")
                         or record.get("controller_id")
                         or record.get("associated_controller")
-                        or "plc-ballast-01"
                     )
+                    ctrl_id = normalize_entity(ctrl_raw) if ctrl_raw else "unknown-controller"
                     events.append(
                         NormalizedEvent(
                             source_id=source_id,

@@ -1,0 +1,66 @@
+{
+  "case_id": "AEGIS-HALTED-2026-002",
+  "title": "Project Aegis — Negative Control: Adversary Lateral Movement Halted at Industrial DMZ (Level 3.5)",
+  "version": "1.0.0",
+  "release_date": "2026-10-31",
+  "facility_type": "Pilbara Iron Ore Processing Terminal & Port Facility (Western Australia)",
+  "compliance_frameworks": [
+    {
+      "name": "NIST SP 800-82 Rev. 3",
+      "focus": "OT/ICS Network Segmentation and Industrial DMZ Boundary Defense"
+    },
+    {
+      "name": "MITRE ATT&CK for ICS v20.0",
+      "release_date": "2026-10-13",
+      "tactics_covered": [
+        "Initial Access",
+        "Execution",
+        "Lateral Movement (Defeated at Boundary)"
+      ]
+    },
+    {
+      "name": "ISA-95 / Purdue Enterprise Reference Architecture (PERA)",
+      "levels": [
+        "Level 4 (Enterprise - Compromised)",
+        "Level 3.5 (Industrial DMZ - Intrusion Contained)",
+        "Level 3 (Operations - Uncompromised)",
+        "Level 2 (Supervisory Control - Uncompromised)",
+        "Level 1 (Basic Control - Routine Operations)",
+        "Level 0 (Physical Process - Interlocks Armed)"
+      ]
+    }
+  ],
+  "evidence_sources": {
+    "enterprise": [
+      "enterprise/sysmon.jsonl",
+      "enterprise/windows_security.jsonl"
+    ],
+    "industrial_dmz": [
+      "industrial_dmz/firewall.jsonl",
+      "industrial_dmz/historian_mirror.jsonl"
+    ],
+    "level3_operations": [
+      "level3_operations/historian_audit.jsonl"
+    ],
+    "level2_scada": [
+      "level2_scada/scada_audit.jsonl"
+    ],
+    "level1_plc": [
+      "level1_plc/controller_audit.jsonl"
+    ],
+    "level0_process": [
+      "level0_process/process_events.jsonl"
+    ]
+  },
+  "investigation_targets": {
+    "primary_controller": "plc-ballast-01",
+    "primary_actuator": "xv-4012",
+    "monitored_sensors": ["pt-4012"],
+    "required_predicates": ["modified_logic", "interlock_status"]
+  },
+  "ground_truth": {
+    "expected_attack_path": "ground_truth/expected_attack_path.json",
+    "expected_facts": "ground_truth/expected_facts.json",
+    "expected_conclusions": "ground_truth/expected_conclusions.json"
+  }
+}

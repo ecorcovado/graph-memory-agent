@@ -1,0 +1,1 @@
+{"timestamp": "2026-10-28T11:15:00Z", "gateway": "SCADA-IGNITION-GW01", "account": "op_supervisor", "roles": ["Operator"], "source_host": "OP-CLIENT-01", "source_ip": "10.10.20.88", "action": "SESSION_LOGIN", "status": "SUCCESS", "evidence_basis": "DIRECT_TELEMETRY"}

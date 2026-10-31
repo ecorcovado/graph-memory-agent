@@ -1553,6 +1553,77 @@ class TestGraphMemoryAgent(unittest.TestCase):
         finally:
             shutil.rmtree(temp_case)
 
+    def test_negative_control_scenario_refuses_closed(self):
+        """v0.5.5: Verification that negative ablation scenario halts at DMZ and deterministically refuses."""
+        from benchmark import BenchmarkAutonomousLLM, TARGET_QUESTION
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        neg_case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident_halted_dmz")
+        loader = CaseLoader(neg_case_dir)
+        kg = loader.load_case()
+
+        llm = BenchmarkAutonomousLLM(kg)
+        agent = GraphReaderAgent(llm, kg, max_steps=8, verbose=False, notebook_max_tokens=2500)
+        llm.set_agent(agent)
+
+        answer = agent.run(TARGET_QUESTION)
+        self.assertIn("INSUFFICIENT EVIDENCE", answer)
+        self.assertTrue("modified_logic" in answer or "interlock_status" in answer)
+        self.assertNotIn("reached plc", answer.lower())
+
+    def test_zero_fallback_unspecified_target_controller_fails_closed(self):
+        """v0.5.5: Zero-fallback enforcement: when neither query nor manifest defines a controller, claim fails closed."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+        # Wipe manifest targets to test unconfigured case
+        kg.investigation_targets = {}
+
+        sysmon_facts = [f for f in kg.atomic_facts.values() if f.relation == "executed"]
+        self.assertTrue(len(sysmon_facts) > 0)
+        sys_fid = sysmon_facts[0].fact_id
+
+        # LLM cites valid notebook fact but claims controller modification without defined target
+        client = MockOllamaClient(responses={
+            "Target Question": f"The attacker downloaded modified logic to the controller [{sys_fid}]."
+        })
+        agent = GraphReaderAgent(client, kg)
+        agent.notebook.add_note(step=1, source_node="corp-ws-019", content="Observed activity", fact_ids=[sys_fid])
+
+        # Query does NOT specify any target controller
+        ans = agent.synthesize_answer("Did the attacker reach any industrial assets?")
+        self.assertIn("INSUFFICIENT EVIDENCE", ans)
+        self.assertIn("no target controller was defined", ans.lower())
+
+    def test_manifest_custom_controller_target_enforcement(self):
+        """v0.5.5: Verification that manifest-declared custom controller (plc-water-01) is strictly enforced."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+        # Configure custom facility target in manifest
+        kg.investigation_targets = {
+            "primary_controller": "plc-water-01",
+            "primary_actuator": "xv-9000",
+            "required_predicates": ["modified_logic"]
+        }
+
+        cip_facts = [f for f in kg.atomic_facts.values() if f.relation == "modified_logic"]
+        self.assertTrue(len(cip_facts) > 0)
+        fact_cip = cip_facts[0]
+
+        # LLM attempts to answer with Aegis controller (plc-ballast-01) instead of manifest target (plc-water-01)
+        client = MockOllamaClient(responses={
+            "Target Question": f"The workstation downloaded modified logic to plc-ballast-01 [{fact_cip.fact_id}]."
+        })
+        agent = GraphReaderAgent(client, kg)
+        agent.notebook.add_note(step=1, source_node="eng-ws-02", content="Downloaded logic", fact_ids=[fact_cip.fact_id])
+
+        # Query asks about controller without specific name; manifest target plc-water-01 must be enforced
+        ans = agent.synthesize_answer("Did the adversary modify controller logic?")
+        self.assertIn("INSUFFICIENT EVIDENCE", ans)
+        self.assertIn("plc-water-01", ans)
+
 
 if __name__ == "__main__":
     unittest.main()

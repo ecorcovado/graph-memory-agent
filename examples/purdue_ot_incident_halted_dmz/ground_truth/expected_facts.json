@@ -1,0 +1,26 @@
+{
+  "scenario": "Negative Control: Adversary Lateral Movement Halted at Level 3.5 DMZ",
+  "expected_facts": [
+    {
+      "source_type": "SYSMON",
+      "subject": "corp-ws-019",
+      "predicate": "executed",
+      "object": "powershell.exe",
+      "purdue_level": 4.0
+    },
+    {
+      "source_type": "FIREWALL",
+      "subject": "corp-ws-019",
+      "predicate": "connected_to",
+      "object": "dmz-hist-mirror",
+      "purdue_level": 3.5
+    },
+    {
+      "source_type": "FIREWALL",
+      "subject": "dmz-hist-mirror",
+      "predicate": "blocked_connection_to",
+      "object": "scada-ignition-gw01",
+      "purdue_level": 3.5
+    }
+  ]
+}
