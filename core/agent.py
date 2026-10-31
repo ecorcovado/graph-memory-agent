@@ -1,7 +1,7 @@
 """
 Graph-based Agent Loop (Inspired by GraphReader - arXiv:2406.14550)
 Executes rational planning, node selection, coarse-to-fine graph traversal,
-and multi-hop answer reasoning using local Ollama LLMs within a strict 4K window.
+and evidence-verified answer reasoning within a strict 4K context budget.
 """
 
 import json
@@ -13,7 +13,8 @@ from core.notebook import Notebook
 
 class GraphReaderAgent:
     """
-    Autonomous agent navigating a Knowledge Graph to answer complex multi-hop queries.
+    Autonomous agent navigating a directed MultiDiGraph Knowledge Graph
+    to answer complex multi-hop queries with evidence verification.
     """
 
     def __init__(
@@ -22,12 +23,13 @@ class GraphReaderAgent:
         kg: KnowledgeGraph,
         max_steps: int = 8,
         verbose: bool = True,
+        notebook_max_tokens: int = 1500,
     ):
         self.llm = llm_client
         self.kg = kg
         self.max_steps = max_steps
         self.verbose = verbose
-        self.notebook = Notebook()
+        self.notebook = Notebook(max_tokens=notebook_max_tokens)
 
     def _log(self, title: str, text: str):
         if self.verbose:
@@ -37,7 +39,7 @@ class GraphReaderAgent:
     def generate_rational_plan(self, question: str) -> str:
         """Step 1: Decomposes question into a step-by-step rational plan (Figure 7)."""
         prompt = (
-            f"You are an investigative assistant. Outline a concise, step-by-step rational plan "
+            f"You are an investigative cybersecurity assistant. Outline a concise, step-by-step rational plan "
             f"identifying what key entities, relationships, and clues we need to discover in order "
             f"to answer this question.\n\n"
             f"Question: {question}\n\n"
@@ -48,7 +50,10 @@ class GraphReaderAgent:
         return plan
 
     def select_initial_node(self, question: str, plan: str) -> str:
-        """Step 2: Picks the most relevant starting node from available graph nodes (Figure 8)."""
+        """
+        Step 2: Picks the most relevant starting node from available graph nodes (Figure 8).
+        Uses LLM selection with heuristic token overlap and hub-degree fallbacks.
+        """
         nodes = list(self.kg.graph.nodes())
         if not nodes:
             return ""
@@ -62,15 +67,27 @@ class GraphReaderAgent:
         )
         selected = self.llm.generate(prompt=prompt, temperature=0.1).strip().lower()
 
-        # Clean up output to match existing node
+        # 1. Exact or substring match against LLM output
         for node in nodes:
-            if node in selected or selected in node:
+            if node == selected or node in selected or selected in node:
                 self._log("2. INITIAL NODE SELECTED", f"Target: '{node}'")
                 return node
 
-        fallback = nodes[0]
-        self._log("2. INITIAL NODE SELECTED (Fallback)", f"Target: '{fallback}'")
-        return fallback
+        # 2. Fallback: match against question & plan keywords
+        combined_text = f"{question} {plan}".lower()
+        keyword_matches = [
+            n for n in nodes
+            if n in combined_text or any(w in n for w in combined_text.split() if len(w) > 4)
+        ]
+        if keyword_matches:
+            best_match = max(keyword_matches, key=lambda n: len(n))
+            self._log("2. INITIAL NODE SELECTED (Query Overlap Fallback)", f"Target: '{best_match}'")
+            return best_match
+
+        # 3. Fallback: Pick highest degree hub node
+        hub_node = max(nodes, key=lambda n: self.kg.graph.degree(n))
+        self._log("2. INITIAL NODE SELECTED (Hub Degree Fallback)", f"Target: '{hub_node}'")
+        return hub_node
 
     def explore_node(
         self,
@@ -89,12 +106,18 @@ class GraphReaderAgent:
         # 1. Fetch atomic facts for this node
         fact_ids = self.kg.node_to_facts.get(current_node, [])
         facts = [self.kg.atomic_facts[fid] for fid in fact_ids if fid in self.kg.atomic_facts]
-
         facts_text = "\n".join([f"- [{f.fact_id}]: {f.text}" for f in facts])
-        all_neighbors = list(self.kg.graph.neighbors(current_node)) if self.kg.graph.has_node(current_node) else []
+
+        # 2. Fetch directional relations
+        all_neighbors = self.kg.get_adjacent_nodes(current_node)
         unvisited_neighbors = [n for n in all_neighbors if n not in visited]
 
-        # 2. Ask agent to inspect facts and take intermediate notes
+        relations_data = self.kg.get_neighbors_with_relations(current_node)
+        relations_text = "\n".join(
+            [f"- ({direction}) -> [{rel}] -> {target}" for direction, rel, target in relations_data]
+        ) if relations_data else "None"
+
+        # 3. Ask agent to inspect facts and take intermediate notes
         notes_prompt = (
             f"You are an investigative agent gathering evidence to answer a multi-hop question.\n\n"
             f"Target Question: {question}\n"
@@ -104,12 +127,11 @@ class GraphReaderAgent:
             f"Atomic Facts at '{current_node}':\n{facts_text}\n\n"
             f"Instructions:\n"
             f"Extract all relevant facts or intermediate clues that help execute the plan or connect entities.\n"
-            f"Even if a fact does not give the final answer, record it if it identifies an entity's role, previous employer, lab, building, or location.\n"
+            f"Even if a fact does not give the final answer, record it if it identifies an entity's role, relation, action, or target.\n"
             f"If no facts are relevant, reply 'NONE'. Otherwise, write a concise summary of the discovered facts:"
         )
         new_clues = self.llm.generate(prompt=notes_prompt, temperature=0.1).strip()
-        
-        # Only discard if literally empty or just the word NONE
+
         is_none = new_clues.upper().strip() in ["NONE", "NONE.", "'NONE'", '"NONE"']
         if new_clues and not is_none:
             self.notebook.add_note(step=step, source_node=current_node, content=new_clues)
@@ -117,16 +139,17 @@ class GraphReaderAgent:
         else:
             self._log(f"STEP {step}: NOTEBOOK", f"No new clues extracted at [{current_node}].")
 
-        # 3. Decision: Stop or Hop to Neighbor?
+        # 4. Decision: Stop or Hop to Neighbor?
         decision_prompt = (
             f"Target Question: {question}\n"
             f"Rational Plan: {plan}\n"
             f"Current Discovered Clues in Notebook:\n{self.notebook.format_for_prompt()}\n\n"
             f"Current Graph Node: '{current_node}'\n"
+            f"Connected Edges & Relations:\n{relations_text}\n\n"
             f"Available Neighbor Nodes: {', '.join(all_neighbors) if all_neighbors else 'None'}\n"
             f"Unvisited Neighbor Nodes: {', '.join(unvisited_neighbors) if unvisited_neighbors else 'None'}\n\n"
             f"Task:\n"
-            f"Do we already have enough information in the notebook clues to answer the target question?\n"
+            f"Do we already have sufficient evidence in the notebook to definitively answer the target question?\n"
             f"- If YES: reply strictly 'ACTION: TERMINATE'\n"
             f"- If NO: select ONE neighbor node to explore next.\n"
             f"Reply strictly in this format:\n"
@@ -158,13 +181,23 @@ class GraphReaderAgent:
         return None, True
 
     def synthesize_answer(self, question: str) -> str:
-        """Step 4: Compiles all recorded notes and reasons the final answer."""
+        """
+        Step 4: Compiles all recorded notes, performs evidence verification,
+        and reasons the final answer strictly from supported evidence.
+        """
+        if self.notebook.is_empty():
+            return "INSUFFICIENT EVIDENCE: No relevant clues were gathered during graph traversal."
+
         notes = self.notebook.format_for_prompt()
         prompt = (
-            f"You are a technical analyst answering a question based strictly on gathered evidence.\n\n"
-            f"Question: {question}\n\n"
+            f"You are a DFIR technical investigator answering a question based strictly on gathered evidence.\n\n"
+            f"Target Question: {question}\n\n"
             f"Gathered Evidence Notes:\n{notes}\n\n"
-            f"Reason step-by-step and provide a direct, concise final answer:"
+            f"Instructions:\n"
+            f"1. Check if the gathered evidence contains a definitive, unbroken logical link to answer the question.\n"
+            f"2. If evidence is missing, inconclusive, or unsupported, explicitly state: 'INSUFFICIENT EVIDENCE: [explain missing link]'.\n"
+            f"3. If evidence is sufficient, provide the concise evidence chain and the final direct answer.\n"
+            f"Answer:"
         )
         answer = self.llm.generate(prompt=prompt, temperature=0.1)
         self._log("FINAL ANSWER", answer)
@@ -176,6 +209,9 @@ class GraphReaderAgent:
 
         plan = self.generate_rational_plan(question)
         current_node = self.select_initial_node(question, plan)
+
+        if not current_node:
+            return "ERROR: Unable to identify a valid entry-point entity in the knowledge graph."
 
         visited_nodes = set()
         step = 1
@@ -200,7 +236,8 @@ class GraphReaderAgent:
 
             if next_node in visited_nodes:
                 # Avoid looping through already visited nodes
-                unvisited = [n for n in self.kg.graph.neighbors(next_node) if n not in visited_nodes]
+                adjacent = self.kg.get_adjacent_nodes(next_node)
+                unvisited = [n for n in adjacent if n not in visited_nodes]
                 if unvisited:
                     current_node = unvisited[0]
                 else:

@@ -1,42 +1,122 @@
 """
 Unit tests for GraphMemory-Agent core components.
-Ensures graph construction, notebook indexing, and deterministic structures function offline.
+Ensures MultiDiGraph directed construction, typed relationships,
+notebook token-budget enforcement, and deterministic heuristics function offline.
 """
 
 import unittest
 from core.notebook import Notebook, Note
-from core.graph_builder import AtomicFact, KnowledgeGraph
+from core.graph_builder import AtomicFact, KnowledgeGraph, normalize_entity
+from core.agent import GraphReaderAgent
+
+
+class MockOllamaClient:
+    """Mock LLM client for offline deterministic unit testing."""
+    def __init__(self, responses=None):
+        self.responses = responses or {}
+        self.call_history = []
+
+    def generate(self, prompt: str, temperature: float = 0.1, system: str = "") -> str:
+        self.call_history.append(prompt)
+        for key, val in self.responses.items():
+            if key in prompt:
+                return val
+        return "mocked_response"
 
 
 class TestGraphMemoryAgent(unittest.TestCase):
 
-    def test_notebook_addition_and_formatting(self):
-        nb = Notebook()
+    def test_entity_normalization(self):
+        self.assertEqual(normalize_entity("  WORKSTATION-402  "), "workstation-402")
+        self.assertEqual(normalize_entity('"APT-SilverFox"'), "apt-silverfox")
+        self.assertEqual(normalize_entity("System Health   Check"), "system health check")
+
+    def test_notebook_token_budget_and_eviction(self):
+        # Budget = 50 tokens (approx 200 chars)
+        nb = Notebook(max_tokens=50)
         self.assertTrue(nb.is_empty())
+
+        # Add 3 notes that exceed 50 tokens
+        nb.add_note(step=1, source_node="node1", content="Note 1: " + "a" * 120)
+        nb.add_note(step=2, source_node="node2", content="Note 2: " + "b" * 120)
+
+        # Budget should evict Note 1 to stay bounded
+        self.assertLessEqual(nb.estimate_tokens(), 50)
+        formatted = nb.format_for_prompt()
+        self.assertNotIn("Note 1", formatted)
+        self.assertIn("Note 2", formatted)
+
+    def test_notebook_deduplication(self):
+        nb = Notebook(max_tokens=500)
+        nb.add_note(step=1, source_node="nodeA", content="Identical evidence found.")
+        nb.add_note(step=2, source_node="nodeB", content="Identical evidence found.")
         
-        nb.add_note(step=1, source_node="project aegis", content="Marcus Thorne is the lead engineer.")
-        self.assertFalse(nb.is_empty())
         self.assertEqual(len(nb.notes), 1)
 
-        formatted = nb.format_for_prompt()
-        self.assertIn("Marcus Thorne is the lead engineer", formatted)
-        self.assertIn("project aegis", formatted)
-
-    def test_knowledge_graph_structure(self):
+    def test_multidigraph_typed_directed_edges(self):
         kg = KnowledgeGraph()
         fact = AtomicFact(
             fact_id="C0_F1",
             chunk_id=0,
-            text="Marcus Thorne previously worked at Sentinel Core Labs.",
-            key_elements=["marcus thorne", "sentinel core labs"],
+            text="WORKSTATION-402 communicated with 198.51.100.44",
+            subject="workstation-402",
+            relation="communicated_with",
+            object_entity="198.51.100.44",
+            key_elements=["workstation-402", "198.51.100.44"],
         )
         kg.atomic_facts[fact.fact_id] = fact
-        kg.graph.add_edge("marcus thorne", "sentinel core labs", weight=1, fact_ids=[fact.fact_id])
+        kg.graph.add_edge(
+            "workstation-402",
+            "198.51.100.44",
+            relation="communicated_with",
+            fact_id=fact.fact_id,
+        )
 
-        self.assertTrue(kg.graph.has_node("marcus thorne"))
-        self.assertTrue(kg.graph.has_node("sentinel core labs"))
-        self.assertTrue(kg.graph.has_edge("marcus thorne", "sentinel core labs"))
-        self.assertEqual(list(kg.graph.neighbors("marcus thorne")), ["sentinel core labs"])
+        self.assertTrue(kg.graph.has_edge("workstation-402", "198.51.100.44"))
+        # In a directed graph, the reverse does not exist automatically
+        self.assertFalse(kg.graph.has_edge("198.51.100.44", "workstation-402"))
+
+        # Verify directional relation helper
+        rel_data = kg.get_neighbors_with_relations("workstation-402")
+        self.assertEqual(len(rel_data), 1)
+        direction, rel, target = rel_data[0]
+        self.assertEqual(direction, "outgoing")
+        self.assertEqual(rel, "communicated_with")
+        self.assertEqual(target, "198.51.100.44")
+
+    def test_initial_node_selection_fallbacks(self):
+        kg = KnowledgeGraph()
+        kg.graph.add_node("workstation-402")
+        kg.graph.add_node("powershell.exe")
+        kg.graph.add_node("apt-silverfox")
+        # Make apt-silverfox a hub node
+        kg.graph.add_edge("apt-silverfox", "workstation-402")
+        kg.graph.add_edge("apt-silverfox", "powershell.exe")
+
+        client = MockOllamaClient(responses={})  # Will return "mocked_response" which matches no node
+        agent = GraphReaderAgent(client, kg)
+
+        # Keyword overlap fallback should select "workstation-402"
+        selected = agent.select_initial_node(
+            question="What happened on workstation-402?",
+            plan="Investigate workstation-402"
+        )
+        self.assertEqual(selected, "workstation-402")
+
+        # Hub degree fallback should select "apt-silverfox" when query contains no node names
+        hub_selected = agent.select_initial_node(
+            question="Unknown anomaly detected?",
+            plan="Search general systems"
+        )
+        self.assertEqual(hub_selected, "apt-silverfox")
+
+    def test_evidence_verification_on_empty_notebook(self):
+        kg = KnowledgeGraph()
+        client = MockOllamaClient()
+        agent = GraphReaderAgent(client, kg)
+
+        answer = agent.synthesize_answer("What is the persistence task?")
+        self.assertIn("INSUFFICIENT EVIDENCE", answer)
 
 
 if __name__ == "__main__":

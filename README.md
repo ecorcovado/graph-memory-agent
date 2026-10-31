@@ -2,7 +2,7 @@
 
 A lightweight Python tool that lets small, local LLMs (like Qwen 2.5 Coder 7B on Ollama) navigate complex, multi-hop documents without blowing past a 4k token window.
 
-Built from the core concepts in the *GraphReader* paper ([arXiv:2406.14550](https://arxiv.org/abs/2406.14550)), with a specific focus on **local cybersecurity incident analysis and threat hunting**.
+Built from the core concepts in the *GraphReader* paper ([arXiv:2406.14550](https://arxiv.org/abs/2406.14550)), with a specific focus on **offline-first, evidence-driven cybersecurity incident analysis and threat hunting**.
 
 ---
 
@@ -10,14 +10,14 @@ Built from the core concepts in the *GraphReader* paper ([arXiv:2406.14550](http
 
 ### 1. Vector RAG fails at multi-hop links
 Vector search (cosine similarity on text embeddings) works when the answer is in one chunk. It breaks down when answering multi-stage questions like:
-> *"What persistence registry key was dropped by the threat group behind the C2 beacon detected on WKSTN-809?"*
+> *"What persistence scheduled task is associated with the threat group communicating with WORKSTATION-402?"*
 
-The endpoint alert on `WKSTN-809` mentions an IP, the threat intel report links that IP to an APT group, and the group profile mentions the registry key. An embedding search for "registry key on WKSTN-809" will not find the connection.
+The endpoint alert on `WORKSTATION-402` mentions an IP, the threat intel report links that IP to an APT group, and the group profile mentions the scheduled task. An embedding search for "scheduled task on WORKSTATION-402" will not find the connection.
 
 ### 2. Massive context windows degrade and cost money
 Dumping 50,000 lines of SIEM logs into a 128k context window triggers "lost-in-the-middle" attention degradation. More importantly, in security operations (SOC/DFIR), you cannot leak client network logs, internal IPs, or credential paths to third-party cloud APIs.
 
-This project runs **100% locally** via Ollama. It extracts an entity co-occurrence graph and uses an autonomous agent loop that hops from entity to entity, logging intermediate clues into a scratchpad memory until it has enough evidence to answer.
+This project runs **100% locally** via Ollama. It extracts a directed `MultiDiGraph` with typed relationships (`Subject -> Relation -> Object`), uses an autonomous agent loop that hops across entities, and logs intermediate clues into a bounded scratchpad memory with strict token budgets.
 
 ---
 
@@ -28,27 +28,37 @@ This project runs **100% locally** via Ollama. It extracts an entity co-occurren
             │
             ▼
  1. Atomic Fact Extraction
-    - Chunks text
-    - Prompts local LLM for standalone atomic facts + key entities
+    - Chunks text into paragraph-aware blocks
+    - Prompts local LLM for standalone atomic facts + typed triples
             │
             ▼
- 2. NetworkX Knowledge Graph
-    - Nodes: Hostnames, Users, IPs, Threat Actors, Hashes, Labs
-    - Edges: Shared occurrence across atomic facts
+ 2. Directed MultiDiGraph (NetworkX)
+    - Nodes: Canonicalized Hostnames, Users, IPs, Threat Actors, Tasks
+    - Edges: Directed, typed predicates (communicated_with, executed, attributed_to, maintains_persistence)
             │
             ▼
- 3. Autonomous Traversal Loop (4k Context Budget)
+ 3. Autonomous Traversal Loop (Strict 4k Context Budget)
     ┌────────────────────────────────────────────────────────┐
     │ a. Formulate a rational step-by-step plan              │
-    │ b. Pick the best entry-point node                       │
-    │ c. Inspect atomic facts at current node                 │
-    │ d. Record discovered clues into the Notebook            │
-    │ e. Decide next action: HOP to neighbor OR TERMINATE     │
+    │ b. Pick the best entry-point node (heuristics fallback)│
+    │ c. Inspect atomic facts & directional relations        │
+    │ d. Record discovered clues into Bounded Notebook       │
+    │ e. Decide next action: HOP to neighbor OR TERMINATE    │
     └────────────────────────────────────────────────────────┘
             │
             ▼
- 4. Direct Answer Synthesis from Notebook Evidence
+ 4. Evidence-Verified Answer Synthesis (Step-by-step Chain)
 ```
+
+---
+
+## Key Technical Guardrails
+
+* **Directed MultiDiGraph:** Distinguishes relationship directions (`Process -> executed -> Command` vs reverse) and supports multiple typed edges with fact provenance IDs.
+* **Bounded Notebook Memory:** Enforces a strict token budget with deduplication and FIFO eviction of oldest notes so prompts never exceed the 4K context window.
+* **Explicit Context Limit:** Passes `"options": {"num_ctx": 4096}` directly to the Ollama API.
+* **Resilient Node Selection:** Avoids blind fallbacks; uses query keyword overlap and hub-degree centrality.
+* **Evidence Verification:** Requires an unbroken evidence chain before synthesizing a final answer, preventing unsupported hallucinations.
 
 ---
 
@@ -69,10 +79,10 @@ cd graph-memory-agent
 # Install dependencies (only networkx required)
 pip install networkx
 
-# 1. Run the built-in benchmark
+# 1. Run against the built-in benchmark
 python run_agent.py --model qwen2.5-coder:7b
 
-# 2. Run against a custom incident report or log file
+# 2. Run against the DFIR incident report
 python run_agent.py --file examples/cyber_incident_report.txt --question "What persistence scheduled task is associated with the threat group communicating with WORKSTATION-402?"
 
 # 3. Run offline unit tests
@@ -81,37 +91,49 @@ python -m unittest tests/test_components.py
 
 ---
 
-## Example Trajectory
+## Live Reasoning Trajectory (Cyber DFIR Triage)
 
 Tested locally on `qwen2.5-coder:7b` (4K context constraint):
 
 ```text
 Target Question:
-"In which historic building was the lab founded where the lead architect of Project Aegis previously worked?"
+"What persistence scheduled task is associated with the threat group communicating with WORKSTATION-402?"
 
 [1. RATIONAL PLAN]
-Decompose query: Identify lead architect of Project Aegis -> Identify previous lab/company -> Locate founding historic building.
+Discover threat group communicating with WORKSTATION-402 -> Identify scheduled tasks -> Establish persistence link.
 
 [2. INITIAL NODE SELECTED]
-Target: 'project aegis'
+Target: 'workstation-402'
 
 [STEP 1: NOTEBOOK UPDATED]
-Node: 'project aegis'
-Discovered: Marcus Thorne is the lead engineer who architected the ingestion engine for Project Aegis.
-Action: ACTION: HOP | marcus thorne
+Node: 'workstation-402'
+Discovered: WORKSTATION-402 made an outbound connection to 198.51.100.44; obfuscated powershell.exe execution identified.
+Action: ACTION: HOP | 198.51.100.44
 
 [STEP 2: NOTEBOOK UPDATED]
-Node: 'marcus thorne'
-Discovered: Marcus Thorne previously led the threat research division at Sentinel Core Labs based in Melbourne.
-Action: ACTION: HOP | sentinel core labs
+Node: '198.51.100.44'
+Discovered: Threat intelligence attributes IP 198.51.100.44 to APT-SilverFox.
+Action: ACTION: HOP | apt-silverfox
 
 [STEP 3: NOTEBOOK UPDATED]
-Node: 'sentinel core labs'
-Discovered: Sentinel Core Labs was founded in 2018 inside the historic Old Treasury Building in Melbourne, Victoria.
-Action: ACTION: HOP | old treasury building
+Node: 'apt-silverfox'
+Discovered: APT-SilverFox maintains persistence using the SystemHealthCheck task.
+Action: ACTION: HOP | systemhealthcheck
+
+[STEP 4: NOTEBOOK UPDATED]
+Node: 'systemhealthcheck'
+Discovered: SystemHealthCheck executes a backdoor DLL.
+Action: ACTION: HOP | backdoor dll
 
 [FINAL ANSWER]
-"The historic building where the lab (Sentinel Core Labs) was founded, where the lead architect of Project Aegis (Marcus Thorne) previously worked, is the Old Treasury Building in Melbourne, Victoria."
+Evidence Chain:
+1. WORKSTATION-402 made an outbound connection to 198.51.100.44.
+2. Threat intelligence attributes IP 198.51.100.44 to APT-SilverFox.
+3. APT-SilverFox maintains persistence using the SystemHealthCheck task.
+4. SystemHealthCheck executes a backdoor DLL.
+
+Final Direct Answer:
+The persistence scheduled task associated with the threat group communicating with WORKSTATION-402 is SystemHealthCheck.
 ```
 
 ---
@@ -121,14 +143,29 @@ Action: ACTION: HOP | old treasury building
 ```
 graph-memory-agent/
 ├── core/
-│   ├── graph_builder.py   # Ollama client, fact extractor, and NetworkX builder
-│   ├── notebook.py        # Append-only structured scratchpad memory
-│   └── agent.py           # Rational planner, node explorer, and traversal logic
+│   ├── graph_builder.py   # Ollama client, fact extractor, and NetworkX MultiDiGraph
+│   ├── notebook.py        # Bounded scratchpad memory with token budgeting
+│   └── agent.py           # Rational planner, node explorer, and evidence verifier
+├── examples/
+│   └── cyber_incident_report.txt # DFIR incident triage scenario
 ├── tests/
-│   └── test_components.py # Offline deterministic unit tests
+│   └── test_components.py # 6 offline unit tests (token limits, graph direction, fallbacks)
 ├── run_agent.py           # CLI entry point
 └── README.md
 ```
+
+---
+
+## Roadmap
+
+* [x] Directed `MultiDiGraph` with typed relationship predicates
+* [x] Strict 4K token budget enforcement in Notebook memory
+* [x] Evidence verification chain on final answers
+* [ ] **OT/ICS Security (Purdue Model):** Ingest industrial control logs correlating Level 2 SCADA/HMI commands, Level 3.5 DMZ jump-hosts, and Level 1 PLC logic modifications.
+* [ ] **Structured Log Parsers:** Ingestion for Sysmon JSON and Windows Event Logs (EVTX).
+* [ ] **MITRE ATT&CK & ATT&CK for ICS:** Direct mapping of observed graph edges to ATT&CK techniques.
+
+---
 
 ## Reference
 - Li et al., *"GraphReader: Building Graph-based Agent to Enhance Long-Context Abilities of Large Language Models"*, arXiv:2406.14550 (2024).
