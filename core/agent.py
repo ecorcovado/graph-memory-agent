@@ -5,11 +5,55 @@ and deterministic evidence-verified answer reasoning within a strict 4K context 
 """
 
 import json
+import os
 import re
-from typing import List, Optional, Set, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple
 from core.graph_builder import KnowledgeGraph, LocalOllamaClient
 from core.notebook import Notebook, SourceReference
 from core.budget_manager import PromptBudgetManager
+
+
+@dataclass
+class InvestigationRequirements:
+    """Explicit evidence requirements policy for proving claims in an investigation."""
+    required_source_types: Set[str] = field(default_factory=set)
+    required_predicates: Set[str] = field(default_factory=set)
+    target_claim: str = ""
+
+
+def extract_json_objects(text: str) -> List[dict]:
+    """Safely extracts top-level JSON objects using balanced brace parsing to avoid greedy regex capture."""
+    results = []
+    # 1. Check for markdown code blocks ```json ... ```
+    code_blocks = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    for block in code_blocks:
+        try:
+            results.append(json.loads(block))
+        except Exception:
+            pass
+    if results:
+        return results
+
+    # 2. Balanced brace scanner to safely extract top-level JSON objects without greedy capture
+    start = -1
+    depth = 0
+    for i, ch in enumerate(text):
+        if ch == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == '}':
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start != -1:
+                    candidate = text[start:i+1]
+                    try:
+                        results.append(json.loads(candidate))
+                    except Exception:
+                        pass
+                    start = -1
+    return results
 
 
 class GraphReaderAgent:
@@ -264,15 +308,62 @@ class GraphReaderAgent:
         self._log(f"STEP {step}: TERMINATION", "No valid adjacent unvisited neighbors remaining.")
         return None, True
 
-    def synthesize_answer(self, question: str) -> str:
+    def synthesize_answer(self, question: str, requirements: Optional[InvestigationRequirements] = None) -> str:
         """
         Step 4: Compiles all recorded notes, performs deterministic evidence verification,
+        enforces degraded evidence policies and investigation requirements,
         validates cited fact IDs against immutable notebook facts, and fails closed if evidence is missing.
         """
+        # 1. Enforce Investigation Requirements & Degraded Evidence Policy
+        q_lower = question.lower()
+        if requirements is None:
+            if "plc" in q_lower and ("modif" in q_lower or "compromis" in q_lower or "reach" in q_lower or "logic" in q_lower or "attack" in q_lower):
+                requirements = InvestigationRequirements(
+                    required_source_types={"CONTROLLER_AUDIT"},
+                    required_predicates={"modified_logic"},
+                    target_claim="PLC logic modification",
+                )
+            elif "pressure" in q_lower or "valve" in q_lower or "dump" in q_lower or "interlock" in q_lower:
+                requirements = InvestigationRequirements(
+                    required_source_types={"PROCESS_TELEMETRY"},
+                    required_predicates={"has_observation", "measured_value", "commanded_state", "interlock_status"},
+                    target_claim="Physical process observation / safety trip",
+                )
+
+        if requirements and hasattr(self.kg, "ingestion_report") and self.kg.ingestion_report:
+            missing_sources = self.kg.ingestion_report.missing_sources
+            missing_types = set()
+            from core.case_loader import CaseLoader
+            for ms in missing_sources:
+                fname = ms.split("/")[-1].split("\\")[-1]
+                stype = CaseLoader.SOURCE_TYPE_MAPPING.get(fname, fname)
+                missing_types.add(stype)
+
+            unmet_sources = requirements.required_source_types.intersection(missing_types)
+            if unmet_sources:
+                self._log("DEGRADED EVIDENCE POLICY ENFORCED", f"Missing required sources: {unmet_sources}")
+                return (
+                    f"INSUFFICIENT EVIDENCE: Investigation degraded. Required telemetry source(s) "
+                    f"{sorted(list(unmet_sources))} missing from case ingestion; cannot substantiate "
+                    f"claims regarding {requirements.target_claim}."
+                )
+
         if self.notebook.is_empty():
             return "INSUFFICIENT EVIDENCE: No relevant clues were gathered during graph traversal."
 
         verified_fact_ids = self.notebook.get_all_fact_ids()
+
+        # Enforce required predicate presence in gathered notebook
+        if requirements and requirements.required_predicates:
+            notebook_facts = [self.kg.atomic_facts.get(fid) for fid in verified_fact_ids if fid in self.kg.atomic_facts]
+            has_pred = any(f.relation in requirements.required_predicates for f in notebook_facts if f)
+            if not has_pred:
+                self._log("EVIDENCE POLICY ENFORCED", f"Missing required predicate: {requirements.required_predicates}")
+                return (
+                    f"INSUFFICIENT EVIDENCE: Gathered evidence lacks required predicate(s) "
+                    f"{sorted(list(requirements.required_predicates))} to prove {requirements.target_claim}."
+                )
+
         notes = self.notebook.format_for_prompt()
 
         sys_prompt, prompt, _ = PromptBudgetManager.assemble_prompt(
@@ -291,21 +382,24 @@ class GraphReaderAgent:
         )
         answer = self.llm.generate(prompt=prompt, system=sys_prompt, temperature=0.1)
 
-        # 1. Exact Set Membership against verified immutable fact registry
-        cited_fact_ids = {fid for fid in verified_fact_ids if fid in answer}
-
-        # 2. Support structured JSON output if provided
+        # 2. Extract potential structured JSON output using balanced brace scanner
+        parsed_jsons = extract_json_objects(answer)
         json_cited = set()
-        if "cited_fact_ids" in answer:
-            try:
-                json_match = re.search(r"\{.*\}", answer, re.DOTALL)
-                if json_match:
-                    parsed_json = json.loads(json_match.group(0))
-                    for item in parsed_json.get("cited_fact_ids", []):
-                        if isinstance(item, str):
-                            json_cited.add(item.strip())
-            except Exception:
-                pass
+        structured_claims = []
+        for pjson in parsed_jsons:
+            if isinstance(pjson, dict):
+                for item in pjson.get("cited_fact_ids", []):
+                    if isinstance(item, str):
+                        json_cited.add(item.strip())
+                for claim in pjson.get("claims", []):
+                    if isinstance(claim, dict):
+                        structured_claims.append(claim)
+                        for item in claim.get("fact_ids", []):
+                            if isinstance(item, str):
+                                json_cited.add(item.strip())
+
+        # Exact Set Membership against verified immutable fact registry
+        cited_fact_ids = {fid for fid in verified_fact_ids if fid in answer}
         cited_fact_ids.update(json_cited.intersection(verified_fact_ids))
 
         # 3. Detect fabricated or unverified Fact IDs cited in the answer
@@ -340,11 +434,26 @@ class GraphReaderAgent:
                 "no verifiable citations to atomic fact IDs."
             )
 
+        # 4. Claim-Level Predicate Validation (Finding 3):
+        # Validate that cited facts establish the relationship claimed
+        if structured_claims:
+            for claim in structured_claims:
+                stmt = claim.get("statement", "").lower()
+                c_fids = claim.get("fact_ids", [])
+                claim_facts = [self.kg.atomic_facts.get(fid) for fid in c_fids if fid in self.kg.atomic_facts]
+                if ("plc" in stmt or "logic" in stmt or "controller" in stmt) and "modif" in stmt:
+                    if not any(f.relation == "modified_logic" for f in claim_facts if f):
+                        self._log("CLAIM VALIDATION FAILED", f"Claim '{stmt}' not supported by predicate 'modified_logic'")
+                        return (
+                            f"INSUFFICIENT EVIDENCE: Claim '{claim.get('statement')}' cites facts that do not "
+                            f"establish required predicate 'modified_logic'."
+                        )
+
         self._log("EVIDENCE VERIFIED", f"All cited Fact IDs verified against notebook: {cited_fact_ids}")
         self._log("FINAL ANSWER", answer)
         return answer
 
-    def run(self, question: str) -> str:
+    def run(self, question: str, requirements: Optional[InvestigationRequirements] = None) -> str:
         """Executes full autonomous GraphReader workflow."""
         self._log("STARTING INVESTIGATION", f"Query: {question}")
 
@@ -389,4 +498,4 @@ class GraphReaderAgent:
 
             step += 1
 
-        return self.synthesize_answer(question)
+        return self.synthesize_answer(question, requirements=requirements)

@@ -27,6 +27,7 @@ OBSERVED_PREDICATES = {
     "modified_registry", "logged_into", "downloaded", "established_beacon",
     "modified_logic", "sent_command", "authenticated_to", "scanned",
     "has_observation", "measured_value", "commanded_state", "actual_state", "interlock_status",
+    "queried_tag_store", "replicated_tags_to",
 }
 
 INTELLIGENCE_PREDICATES = {

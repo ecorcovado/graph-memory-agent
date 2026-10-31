@@ -89,8 +89,19 @@ class StructuredLogParser:
         events = []
         ingested_at = datetime.now(timezone.utc).isoformat()
         raw = json.dumps(data)
-        # Missing timestamps must be explicit "UNKNOWN" to prevent false timeline creation
-        event_time = data.get("timestamp", "UNKNOWN")
+        # Timestamp validation & normalization: Missing timestamps must be explicit "UNKNOWN"
+        raw_ts = data.get("timestamp")
+        if raw_ts:
+            try:
+                ts_str = str(raw_ts).strip()
+                dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                event_time = dt.astimezone(timezone.utc).isoformat()
+            except Exception:
+                event_time = "INVALID_TIMESTAMP"
+        else:
+            event_time = "UNKNOWN"
         purdue_level = data.get("purdue_level")
 
         # Source trust validation: Only verified telemetry sources may assign DIRECT_TELEMETRY
@@ -315,7 +326,7 @@ class StructuredLogParser:
                     ingested_at=ingested_at,
                     event_type="SQL_QUERY_EXPORT",
                     subject=host,
-                    predicate="connected_to",
+                    predicate="queried_tag_store",
                     object_entity="plant_tags",
                     raw_record=raw,
                     source_location=f"{file_rel}:L{line_idx}",
@@ -345,7 +356,7 @@ class StructuredLogParser:
                     ingested_at=ingested_at,
                     event_type="TAG_REPLICATION_SYNC",
                     subject=peer,
-                    predicate="connected_to",
+                    predicate="replicated_tags_to",
                     object_entity=host,
                     raw_record=raw,
                     source_location=f"{file_rel}:L{line_idx}",
@@ -424,7 +435,7 @@ class StructuredLogParser:
             act_state = data.get("actual_state")
 
             if pressure is not None:
-                obs_id = f"obs-{tag}-001" if tag else f"obs-pressure-{line_idx:03d}"
+                obs_id = f"obs-{tag}-{source_id[:8]}-r{line_idx:04d}" if tag else f"obs-pressure-{source_id[:8]}-r{line_idx:04d}"
                 # 1. tag -> has_observation -> obs_id
                 events.append(
                     NormalizedEvent(
@@ -473,7 +484,7 @@ class StructuredLogParser:
                 )
 
             if interlock or cmd_state or act_state:
-                obs_valve_id = f"obs-{tag}-001" if tag else f"obs-valve-{line_idx:03d}"
+                obs_valve_id = f"obs-{tag}-{source_id[:8]}-r{line_idx:04d}" if tag else f"obs-valve-{source_id[:8]}-r{line_idx:04d}"
                 # 1. tag -> has_observation -> obs_valve_id
                 events.append(
                     NormalizedEvent(
@@ -635,7 +646,14 @@ class CaseLoader:
                 source_type = self.SOURCE_TYPE_MAPPING.get(file_name, "UNCLASSIFIED")
 
                 # 3. Parse directly from the hashed byte snapshot (Byte-Preserving Ingestion)
-                file_text = file_bytes.decode("utf-8", errors="replace")
+                try:
+                    file_text = file_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    print(f"    [WARN] File contains invalid UTF-8: {rel_file}")
+                    source_records_rejected += 1
+                    empty_sources.append(rel_file)
+                    continue
+
                 raw_lines = [l.strip() for l in file_text.splitlines() if l.strip()]
 
                 if not raw_lines:
@@ -646,6 +664,9 @@ class CaseLoader:
                     source_records_read += 1
                     try:
                         record = json.loads(line_str)
+                        if not isinstance(record, dict):
+                            source_records_rejected += 1
+                            continue
                         events = StructuredLogParser.parse_line(
                             record,
                             source_id=source_id,
@@ -656,7 +677,8 @@ class CaseLoader:
                         if events:
                             source_records_parsed += 1
                             all_events.extend(events)
-                            # Store raw record in vault
+                            # Store raw record and original line text in vault
+                            record["_raw_line"] = line_str
                             for ev in events:
                                 kg.raw_record_vault[(ev.source_id, ev.record_id)] = record
                         else:

@@ -716,6 +716,188 @@ class TestGraphMemoryAgent(unittest.TestCase):
         self.assertEqual(rep.records_read, rep.source_records_read)
         self.assertEqual(rep.records_parsed, rep.source_records_parsed)
 
+    def test_complete_vs_degraded_investigation_benchmark(self):
+        import os
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+
+        # 1. Complete Case: All evidence present -> Agent verifies PLC modification with citations
+        kg_complete = loader.load_case()
+        self.assertTrue(kg_complete.ingestion_report.is_complete)
+        cip_facts = [f for f in kg_complete.atomic_facts.values() if f.relation == "modified_logic" and f.object_entity == "plc-ballast-01"]
+        self.assertTrue(len(cip_facts) > 0)
+        fact_cip = cip_facts[0]
+
+        valid_response = f"The compromise reached the PLC. Engineering workstation ENG-WS-02 downloaded modified logic to PLC-BALLAST-01 [{fact_cip.fact_id}]."
+        client_complete = MockOllamaClient(responses={"Did the enterprise compromise reach the PLC?": valid_response})
+        agent_complete = GraphReaderAgent(client_complete, kg_complete)
+        agent_complete.notebook.add_note(step=1, source_node="eng-ws-02", content="Modified PLC logic", fact_ids=[fact_cip.fact_id])
+        ans_complete = agent_complete.synthesize_answer("Did the enterprise compromise reach the PLC?")
+        self.assertNotIn("INSUFFICIENT EVIDENCE", ans_complete)
+        self.assertIn(fact_cip.fact_id, ans_complete)
+
+        # 2. Degraded Case: controller_audit.jsonl removed -> Agent enforces degraded policy and fails closed
+        kg_degraded = loader.load_case(exclude_sources=["controller_audit.jsonl"])
+        self.assertFalse(kg_degraded.ingestion_report.is_complete)
+        sysmon_facts = [f for f in kg_degraded.atomic_facts.values() if f.source_type == "SYSMON_EVENT"]
+        dummy_id = sysmon_facts[0].fact_id
+
+        fraud_attempt = f"The compromise reached the PLC via PowerShell execution on the workstation [{dummy_id}]."
+        client_degraded = MockOllamaClient(responses={"Did the enterprise compromise reach the PLC?": fraud_attempt})
+        agent_degraded = GraphReaderAgent(client_degraded, kg_degraded)
+        agent_degraded.notebook.add_note(step=1, source_node="corp-ws-019", content="Executed powershell", fact_ids=[dummy_id])
+        ans_degraded = agent_degraded.synthesize_answer("Did the enterprise compromise reach the PLC?")
+        self.assertIn("INSUFFICIENT EVIDENCE", ans_degraded)
+        self.assertIn("CONTROLLER_AUDIT", ans_degraded)
+
+    def test_observation_nodes_do_not_collide_across_repeated_measurements(self):
+        # 4 readings from the same sensor PT-4012 across time
+        readings = [
+            {"timestamp": "2026-10-28T14:00:00Z", "tag_id": "PT-4012", "value_bar": 6.2, "purdue_level": 0},
+            {"timestamp": "2026-10-28T14:05:00Z", "tag_id": "PT-4012", "value_bar": 8.1, "purdue_level": 0},
+            {"timestamp": "2026-10-28T14:10:00Z", "tag_id": "PT-4012", "value_bar": 12.4, "purdue_level": 0},
+            {"timestamp": "2026-10-28T14:15:00Z", "tag_id": "PT-4012", "value_bar": 13.0, "purdue_level": 0},
+        ]
+        all_obs_nodes = set()
+        for idx, r in enumerate(readings, 1):
+            events = StructuredLogParser.parse_line(
+                r,
+                source_id="src_telemetry_001",
+                source_type="PROCESS_TELEMETRY",
+                file_rel="process_events.jsonl",
+                line_idx=idx,
+            )
+            # Find the observation node
+            obs_events = [e for e in events if e.predicate == "has_observation"]
+            self.assertEqual(len(obs_events), 1)
+            obs_node = obs_events[0].object_entity
+            self.assertNotIn(obs_node, all_obs_nodes, f"Collision detected for observation node {obs_node} at line {idx}")
+            all_obs_nodes.add(obs_node)
+
+        # Must have exactly 4 unique observation nodes for 4 distinct readings
+        self.assertEqual(len(all_obs_nodes), 4)
+
+    def test_claim_level_predicate_validation_rejects_unsupported_claims(self):
+        import os
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        # Get a real Sysmon fact (predicate: 'executed')
+        sysmon_facts = [f for f in kg.atomic_facts.values() if f.relation == "executed"]
+        sysmon_fid = sysmon_facts[0].fact_id
+
+        # Model claims PLC modification but cites only Sysmon execution fact
+        structured_payload = json.dumps({
+            "claims": [
+                {
+                    "statement": "The workstation downloaded modified PLC logic to the controller.",
+                    "fact_ids": [sysmon_fid],
+                    "status": "SUPPORTED"
+                }
+            ]
+        })
+        client = MockOllamaClient(responses={"Target Question": structured_payload})
+        agent = GraphReaderAgent(client, kg)
+        agent.notebook.add_note(step=1, source_node="corp-ws-019", content="Executed powershell", fact_ids=[sysmon_fid])
+
+        # Claim-level predicate check must fail closed because fact predicate is 'executed', not 'modified_logic'
+        ans = agent.synthesize_answer("Target Question")
+        self.assertIn("INSUFFICIENT EVIDENCE", ans)
+        self.assertIn("modified_logic", ans)
+
+    def test_historian_operation_specific_predicates(self):
+        # 1. Historian Mirror uses queried_tag_store
+        mirror_events = StructuredLogParser.parse_line(
+            {"host": "dmz-hist-mirror", "query": "SELECT * FROM tags"},
+            source_id="src_mirror",
+            source_type="HISTORIAN_MIRROR",
+            file_rel="historian_mirror.jsonl",
+            line_idx=1,
+        )
+        self.assertEqual(len(mirror_events), 1)
+        self.assertEqual(mirror_events[0].predicate, "queried_tag_store")
+        tier_m, _ = classify_relation_forensics(mirror_events[0].predicate, "HISTORIAN_MIRROR", EVIDENCE_BASIS_TELEMETRY)
+        self.assertEqual(tier_m, "OBSERVED")
+
+        # 2. Historian Audit uses replicated_tags_to
+        audit_events = StructuredLogParser.parse_line(
+            {"peer_node": "dmz-hist-mirror", "host": "l3-hist-srv01", "transferred_tags": ["T1"]},
+            source_id="src_audit",
+            source_type="HISTORIAN_AUDIT",
+            file_rel="historian_audit.jsonl",
+            line_idx=1,
+        )
+        self.assertEqual(len(audit_events), 1)
+        self.assertEqual(audit_events[0].predicate, "replicated_tags_to")
+        tier_a, _ = classify_relation_forensics(audit_events[0].predicate, "HISTORIAN_AUDIT", EVIDENCE_BASIS_TELEMETRY)
+        self.assertEqual(tier_a, "OBSERVED")
+
+    def test_raw_record_vault_line_preservation_and_non_dict_rejection(self):
+        import tempfile, shutil
+        temp_dir = tempfile.mkdtemp()
+        try:
+            # Create a JSONL with non-dict values (array, int, string) alongside a valid dict
+            test_file = os.path.join(temp_dir, "test_malformed.jsonl")
+            with open(test_file, "w", encoding="utf-8") as f:
+                f.write('{"timestamp": "2026-10-28T15:00:00Z", "host": "CORP-WS-019", "event_id": 1, "process": "cmd.exe"}\n')
+                f.write('[1, 2, 3]\n')
+                f.write('"simple string"\n')
+                f.write('12345\n')
+
+            manifest_content = {
+                "case_id": "TEST-MALFORMED-001",
+                "title": "Malformed Record Test",
+                "evidence_sources": {
+                    "enterprise": ["test_malformed.jsonl"]
+                }
+            }
+            manifest_path = os.path.join(temp_dir, "case_manifest.json")
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest_content, f)
+
+            # Map the test file as SYSMON_EVENT
+            CaseLoader.SOURCE_TYPE_MAPPING["test_malformed.jsonl"] = "SYSMON_EVENT"
+
+            loader = CaseLoader(temp_dir)
+            kg = loader.load_case()
+            self.assertEqual(kg.ingestion_report.source_records_read, 4)
+            self.assertEqual(kg.ingestion_report.source_records_parsed, 1)
+            self.assertEqual(kg.ingestion_report.source_records_rejected, 3)
+
+            # Check that raw line is preserved in vault
+            vault_keys = list(kg.raw_record_vault.keys())
+            self.assertEqual(len(vault_keys), 1)
+            stored_record = kg.raw_record_vault[vault_keys[0]]
+            self.assertIn("_raw_line", stored_record)
+            self.assertIn("cmd.exe", stored_record["_raw_line"])
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_timestamp_validation_and_utc_normalization(self):
+        # 1. ISO-8601 with offset
+        events_offset = StructuredLogParser.parse_line(
+            {"timestamp": "2026-10-28T17:00:00+02:00", "event_id": 1, "host": "H1", "process": "p.exe"},
+            source_id="src1", source_type="SYSMON_EVENT", file_rel="sysmon.jsonl", line_idx=1
+        )
+        self.assertEqual(events_offset[0].event_time, "2026-10-28T15:00:00+00:00")
+
+        # 2. Missing timestamp -> UNKNOWN
+        events_none = StructuredLogParser.parse_line(
+            {"event_id": 1, "host": "H1", "process": "p.exe"},
+            source_id="src1", source_type="SYSMON_EVENT", file_rel="sysmon.jsonl", line_idx=2
+        )
+        self.assertEqual(events_none[0].event_time, "UNKNOWN")
+
+        # 3. Invalid timestamp -> INVALID_TIMESTAMP
+        events_inv = StructuredLogParser.parse_line(
+            {"timestamp": "not-a-date", "event_id": 1, "host": "H1", "process": "p.exe"},
+            source_id="src1", source_type="SYSMON_EVENT", file_rel="sysmon.jsonl", line_idx=3
+        )
+        self.assertEqual(events_inv[0].event_time, "INVALID_TIMESTAMP")
+
 
 if __name__ == "__main__":
     unittest.main()
