@@ -272,6 +272,7 @@ class CaseLoader:
         """
         exclude_sources = set(exclude_sources or [])
         kg = KnowledgeGraph()
+        kg.investigation_targets = self.manifest.get("investigation_targets", {})
         all_events: List[NormalizedEvent] = []
 
         files_discovered = 0

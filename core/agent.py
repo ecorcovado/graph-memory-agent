@@ -332,6 +332,10 @@ class GraphReaderAgent:
         """
         # 1. Enforce Investigation Requirements & Degraded Evidence Policy (Additive)
         q_lower = question.lower()
+        manifest_targets = getattr(self.kg, "investigation_targets", {})
+        default_ctrl = manifest_targets.get("primary_controller")
+        default_act = manifest_targets.get("primary_actuator")
+
         if requirements is None:
             req_sources = set()
             req_preds = set()
@@ -344,14 +348,14 @@ class GraphReaderAgent:
                 req_preds.add("modified_logic")
                 claims.append("PLC logic modification")
                 ctrl_match = re.search(r"plc-[\w-]+", q_lower)
-                exp_ctrl = ctrl_match.group(0) if ctrl_match else "plc-ballast-01"
+                exp_ctrl = ctrl_match.group(0) if ctrl_match else default_ctrl
 
             if any(w in q_lower for w in ["pressure", "valve", "dump", "interlock", "safety", "bypass"]):
                 req_sources.add("PROCESS_TELEMETRY")
                 req_preds.add("interlock_status")
                 claims.append("Physical process interlock telemetry")
                 act_match = re.search(r"[a-z]{2}-\d{4}", q_lower)
-                exp_act = act_match.group(0) if act_match else "xv-4012"
+                exp_act = act_match.group(0) if act_match else default_act
 
             if req_sources:
                 requirements = InvestigationRequirements(
@@ -480,8 +484,16 @@ class GraphReaderAgent:
 
         # 4. Claim-Level Predicate and Entity Validation:
         all_cited_facts = [self.kg.atomic_facts.get(fid) for fid in cited_fact_ids if fid in self.kg.atomic_facts]
-        expected_target_ctrl = requirements.expected_controller if (requirements and requirements.expected_controller) else "plc-ballast-01"
-        expected_target_act = requirements.expected_actuator if (requirements and requirements.expected_actuator) else "xv-4012"
+        expected_target_ctrl = (
+            (requirements.expected_controller if requirements else None)
+            or default_ctrl
+            or "plc-ballast-01"
+        )
+        expected_target_act = (
+            (requirements.expected_actuator if requirements else None)
+            or default_act
+            or "xv-4012"
+        )
 
         # A. Validate Structured Claims if present
         if structured_claims:

@@ -58,6 +58,12 @@
       "level0_process/process_events.jsonl"
     ]
   },
+  "investigation_targets": {
+    "primary_controller": "plc-ballast-01",
+    "primary_actuator": "xv-4012",
+    "monitored_sensors": ["pt-4012"],
+    "required_predicates": ["modified_logic", "interlock_status"]
+  },
   "ground_truth": {
     "expected_attack_path": "ground_truth/expected_attack_path.json",
     "expected_facts": "ground_truth/expected_facts.json",

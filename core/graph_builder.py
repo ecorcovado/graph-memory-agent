@@ -199,6 +199,7 @@ class KnowledgeGraph:
     # Source Record Vault: (source_id, record_id) -> original raw dictionary
     raw_record_vault: Dict[Tuple[str, str], dict] = field(default_factory=dict)
     ingestion_report: Optional[Any] = None
+    investigation_targets: Dict[str, Any] = field(default_factory=dict)
 
     def get_neighbors_with_relations(self, node: str) -> List[ForensicRelation]:
         """
