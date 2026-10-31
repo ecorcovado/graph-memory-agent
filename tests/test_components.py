@@ -932,7 +932,8 @@ class TestGraphMemoryAgent(unittest.TestCase):
                 html = f.read()
             self.assertIn("Project Aegis Incident Investigation Report", html)
             self.assertIn("Level 1: Process Control", html)
-            self.assertIn("100% AUDITED", html)
+            self.assertIn("INGESTION COMPLETE", html)
+            self.assertIn("DIGEST RECORDED", html)
         finally:
             shutil.rmtree(temp_dir)
 
@@ -1258,6 +1259,132 @@ class TestGraphMemoryAgent(unittest.TestCase):
             self.assertIn("&lt;img src=x onerror=alert(&#x27;PWNED&#x27;)&gt;", html_content)
         finally:
             shutil.rmtree(temp_dir)
+
+    def test_zeek_native_tsv_ingestion_and_epoch_timestamp_conversion(self):
+        """v0.5.2: Verification that native Zeek TSV files with #fields headers and epoch timestamps parse correctly."""
+        import tempfile, shutil
+        from core.case_loader import CaseLoader, normalize_timestamp
+
+        # 1. Test epoch normalization
+        norm_ts = normalize_timestamp(1730112310.12)
+        self.assertTrue(norm_ts.startswith("2024-") or norm_ts.startswith("2026-") or norm_ts.startswith("202"))
+        self.assertIn("+00:00", norm_ts)
+
+        norm_ts_str = normalize_timestamp("1730112310.12")
+        self.assertEqual(norm_ts, norm_ts_str)
+
+        # 2. Test native Zeek TSV ingestion via CaseLoader
+        temp_dir = tempfile.mkdtemp()
+        try:
+            tsv_content = (
+                "#separator \\x09\n"
+                "#set_separator\t,\n"
+                "#empty_field\t(empty)\n"
+                "#unset_field\t-\n"
+                "#path\tconn\n"
+                "#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\tservice\tduration\torig_bytes\tresp_bytes\tconn_state\n"
+                "#types\ttime\tstring\taddr\tport\taddr\tport\tstring\tstring\tinterval\tcount\tcount\tstring\n"
+                "1730112310.12\tC12345\t10.10.4.19\t49152\t10.10.30.15\t8088\ttcp\thttp\t0.05\t1200\t4500\tSF\n"
+            )
+            os.makedirs(os.path.join(temp_dir, "logs"), exist_ok=True)
+            tsv_path = os.path.join(temp_dir, "logs", "conn.log")
+            with open(tsv_path, "w", encoding="utf-8") as f:
+                f.write(tsv_content)
+
+            manifest = {
+                "case_id": "TEST-ZEEK-TSV",
+                "title": "Zeek Native TSV Test Case",
+                "evidence_sources": {
+                    "network_dmz": ["logs/conn.log"]
+                }
+            }
+            with open(os.path.join(temp_dir, "case_manifest.json"), "w", encoding="utf-8") as f:
+                json.dump(manifest, f)
+
+            loader = CaseLoader(temp_dir)
+            kg = loader.load_case()
+            self.assertEqual(len(kg.atomic_facts), 1)
+            fact = list(kg.atomic_facts.values())[0]
+            self.assertEqual(fact.subject, "10.10.4.19")
+            self.assertEqual(fact.relation, "communicated_with")
+            self.assertEqual(fact.object_entity, "10.10.30.15")
+            self.assertEqual(fact.attributes.get("service"), "http")
+            self.assertIn("+00:00", fact.event_time)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_exact_controller_claim_validation(self):
+        """v0.5.2: Verification that plain-text claims targeting wrong controller fail closed."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        cip_facts = [f for f in kg.atomic_facts.values() if f.relation == "modified_logic"]
+        self.assertTrue(len(cip_facts) > 0)
+        cip_fid = cip_facts[0].fact_id
+
+        # LLM claims attack reached plc-other-01 but cites fact about plc-ballast-01
+        client = MockOllamaClient(responses={
+            "Target Question": f"The attacker downloaded modified logic to plc-other-01 [{cip_fid}]."
+        })
+        agent = GraphReaderAgent(client, kg)
+        agent.notebook.add_note(step=1, source_node="eng-ws-02", content="Modified logic", fact_ids=[cip_fid])
+
+        answer = agent.synthesize_answer("Did the enterprise compromise reach the PLC plc-other-01?")
+        self.assertIn("INSUFFICIENT EVIDENCE", answer)
+        self.assertIn("plc-other-01", answer)
+
+    def test_exact_valve_interlock_bypass_claim_validation(self):
+        """v0.5.2: Verification that safety interlock claims must cite verified suppressed interlock telemetry."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        # Gather a pressure fact (not an interlock suppression fact)
+        pressure_facts = [f for f in kg.atomic_facts.values() if f.relation == "measured_value"]
+        self.assertTrue(len(pressure_facts) > 0)
+        p_fid = pressure_facts[0].fact_id
+
+        client = MockOllamaClient(responses={
+            "Target Question": f"The safety interlock on XV-4012 was bypassed by the attacker [{p_fid}]."
+        })
+        agent = GraphReaderAgent(client, kg)
+        agent.notebook.add_note(step=1, source_node="obs-pressure", content="Pressure reading", fact_ids=[p_fid])
+
+        answer = agent.synthesize_answer("What safety interlock was bypassed?")
+        self.assertIn("INSUFFICIENT EVIDENCE", answer)
+        self.assertIn("interlock", answer)
+
+    def test_consecutive_prefix_continuity_calculation(self):
+        """v0.5.2: Verification that broken early conduit yields 0% continuity, not fractional credit."""
+        from benchmark import calculate_consecutive_continuity
+
+        # Broken at step 1: L4 conduit disconnected -> 0% continuity
+        self.assertEqual(calculate_consecutive_continuity([False, True, True, True]), 0.0)
+        # Broken at step 2: L4-to-DMZ connected, but DMZ-to-SCADA broken -> 25% continuity
+        self.assertEqual(calculate_consecutive_continuity([True, False, True, True]), 25.0)
+        # Unbroken: 100% continuity
+        self.assertEqual(calculate_consecutive_continuity([True, True, True, True]), 100.0)
+
+    def test_additive_investigation_requirements_policy(self):
+        """v0.5.2: Verification that queries asking for multiple incident phases require all corresponding evidence bases."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+
+        # Ingest degraded case missing CONTROLLER_AUDIT
+        kg_degraded = loader.load_case(exclude_sources=["controller_audit.jsonl"])
+        client = MockOllamaClient()
+        agent = GraphReaderAgent(client, kg_degraded)
+
+        # Question asks for BOTH PLC reach and safety interlock bypass
+        q = "Did the enterprise compromise reach the PLC, and what safety interlock was bypassed?"
+        ans = agent.synthesize_answer(q)
+        self.assertIn("INSUFFICIENT EVIDENCE", ans)
+        self.assertIn("CONTROLLER_AUDIT", ans)
+        self.assertIn("degraded", ans.lower())
 
 
 if __name__ == "__main__":

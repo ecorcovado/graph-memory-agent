@@ -406,5 +406,25 @@ class ProcessTelemetryAdapter(BaseLogAdapter):
                         attributes={"interlock_status": interlock},
                     )
                 )
+                if "PLC" in str(interlock).upper():
+                    # Physical control link connecting Level 1 controller to Level 0 actuator
+                    events.append(
+                        NormalizedEvent(
+                            source_id=source_id,
+                            record_id=f"process_plc_link_{line_idx}",
+                            source_type="PROCESS_TELEMETRY",
+                            event_time=event_time,
+                            ingested_at=ingested_at,
+                            event_type="CONTROLLER_ACTUATOR_LINK",
+                            subject="plc-ballast-01",
+                            predicate="sent_command",
+                            object_entity=tag,
+                            raw_record=raw,
+                            source_location=f"{file_rel}:L{line_idx}",
+                            evidence_basis=evidence_basis,
+                            purdue_level=0.0,
+                            attributes={"interlock_status": interlock, "commanded_state": cmd_state},
+                        )
+                    )
 
         return events

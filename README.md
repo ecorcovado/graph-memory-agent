@@ -220,7 +220,7 @@ graph-memory-agent/
 │       ├── level0_process/        # Level 0 Sensor telemetry & safety valve trip events
 │       └── ground_truth/          # Benchmark expected paths, atomic facts, and fail-closed answers
 ├── tests/
-│   └── test_components.py # 50 offline unit tests (adapters, fail-closed auditing, benchmark, reports)
+│   └── test_components.py # 55 offline unit tests (adapters, fail-closed auditing, benchmark, reports)
 ├── benchmark.py           # 4-way comparative evaluation suite (Keyword vs Vector RAG vs Graph vs Ours)
 ├── run_agent.py           # CLI entry point (supports --file, --case, and --report)
 └── README.md
@@ -243,6 +243,7 @@ graph-memory-agent/
 * [x] **v0.4.3 Temporal and Evidence Integrity:** Enforced degraded evidence policies (fail-closed when required sources missing), collision-free deterministic observation IDs, claim-level predicate verification, operation-specific historian predicates, ISO-8601 UTC timestamp normalization
 * [x] **v0.5.0 Investigation Workspace & Benchmark:** Executive terminal dashboard, standalone interactive HTML incident reports, and 4-way comparative evaluation benchmark
 * [x] **v0.5.1 Forensic Evaluation & Modular Architecture:** 9-stage modular adapter architecture (`core/adapters/` with `SysmonAdapter`, `ZeekAdapter`), string-aware JSON scanner, plaintext claim validation, HTML XSS protection, and conduit continuity verification
+* [x] **v0.5.2 Autonomous Agent Benchmark & Zeek TSV Ingestion:** Autonomous `agent.run()` benchmark execution, native Zeek TSV log parsing with `#fields` / `#types` headers and Unix epoch float timestamp normalization, exact target claim validation (`plc-ballast-01` & valve `xv-4012`), additive investigation requirements, consecutive prefix conduit continuity, and 55 passing unit tests
 * [ ] **Automated ATT&CK Mapping:** Direct lookup mapping of observed edges to MITRE ATT&CK for ICS v20.0 technique IDs.
 
 ---

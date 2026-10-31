@@ -9,6 +9,7 @@ Evidence Validation -> MultiDiGraph -> GraphMemory Agent.
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -78,11 +79,36 @@ class SourceIdentifier:
         return full_sha, source_id
 
 
+def normalize_timestamp(raw_ts: Any) -> str:
+    """Normalizes ISO-8601 strings, Unix epoch floats/integers, or numeric strings to UTC ISO-8601."""
+    if raw_ts is None:
+        return "UNKNOWN"
+    try:
+        # 1. Direct numeric timestamp (e.g. Zeek Unix epoch float/int)
+        if isinstance(raw_ts, (int, float)):
+            dt = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc)
+            return dt.isoformat()
+        ts_str = str(raw_ts).strip()
+        if not ts_str:
+            return "UNKNOWN"
+        # 2. Numeric string timestamp (e.g. "1730112310.120000" or "1730112310")
+        if re.match(r"^\d+(\.\d+)?$", ts_str):
+            dt = datetime.fromtimestamp(float(ts_str), tz=timezone.utc)
+            return dt.isoformat()
+        # 3. ISO-8601 string
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    except Exception:
+        return "INVALID_TIMESTAMP"
+
+
 class StructuredLogParser:
     """
     Unified dispatcher connecting format detection to specialized log adapters:
     - SysmonAdapter (Sysmon EID 1, 3, 11, 12-14, 22)
-    - ZeekAdapter (Zeek conn.log, dns.log, notice.log, http.log)
+    - ZeekAdapter (Zeek conn.log, dns.log, notice.log, http.log in JSON & TSV)
     - WindowsSecurityAdapter (Windows Security EID 4624, 4672, Workstation)
     - FirewallAdapter (DMZ Firewall & Remote Access Gateway)
     - HistorianAdapter (Historian Mirror SQL query export & Replication Sync)
@@ -102,24 +128,14 @@ class StructuredLogParser:
         line_idx: int,
     ) -> List[NormalizedEvent]:
         """
-        Parses a single JSONL log record into canonical NormalizedEvents
+        Parses a single log record dictionary into canonical NormalizedEvents
         with timestamp normalization and strict source trust validation.
         """
         ingested_at = datetime.now(timezone.utc).isoformat()
 
-        # 1. Timestamp validation & normalization: Missing timestamps must be explicit "UNKNOWN"
-        raw_ts = data.get("timestamp") or data.get("ts")
-        if raw_ts:
-            try:
-                ts_str = str(raw_ts).strip()
-                dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                event_time = dt.astimezone(timezone.utc).isoformat()
-            except Exception:
-                event_time = "INVALID_TIMESTAMP"
-        else:
-            event_time = "UNKNOWN"
+        # 1. Timestamp validation & normalization (handles ISO and Unix epoch floats)
+        raw_ts = data.get("timestamp") if "timestamp" in data else data.get("ts")
+        event_time = normalize_timestamp(raw_ts)
 
         # 2. Source trust validation: Only verified telemetry sources may assign DIRECT_TELEMETRY
         if source_type in TRUSTED_TELEMETRY_SOURCES:
@@ -315,34 +331,65 @@ class CaseLoader:
                     print(f"    [WARN] Empty source file detected: {rel_file}")
                     empty_sources.append(rel_file)
 
-                for line_idx, line_str in enumerate(raw_lines, 1):
-                    source_records_read += 1
-                    try:
-                        record = json.loads(line_str)
-                        if not isinstance(record, dict):
-                            source_records_rejected += 1
-                            continue
+                is_zeek_tsv = any(l.startswith("#fields") or l.startswith("#separator") for l in raw_lines[:20])
 
-                        # Stage 5: Sysmon & Zeek Adapters -> Stage 6: Normalized Event Model
+                if is_zeek_tsv:
+                    tsv_fields: List[str] = []
+                    for l in raw_lines:
+                        if l.startswith("#fields"):
+                            tsv_fields = ZeekAdapter.parse_tsv_headers(l)
+                            break
+
+                    for line_idx, line_str in enumerate(raw_lines, 1):
+                        if line_str.startswith("#"):
+                            continue
+                        source_records_read += 1
+                        record = ZeekAdapter.parse_tsv_line(tsv_fields, line_str)
+                        stype = manifest_type if manifest_type != "UNCLASSIFIED" else "ZEEK_FLOW"
                         events = StructuredLogParser.parse_line(
                             data=record,
                             source_id=source_id,
-                            source_type=manifest_type,
+                            source_type=stype,
                             file_rel=rel_file,
                             line_idx=line_idx,
                         )
                         if events:
                             source_records_parsed += 1
                             all_events.extend(events)
-                            # Store raw record and original line text in vault
                             record["_raw_line"] = line_str
                             for ev in events:
                                 kg.raw_record_vault[(ev.source_id, ev.record_id)] = record
                         else:
                             source_records_rejected += 1
-                    except json.JSONDecodeError:
-                        source_records_rejected += 1
-                        continue
+                else:
+                    for line_idx, line_str in enumerate(raw_lines, 1):
+                        source_records_read += 1
+                        try:
+                            record = json.loads(line_str)
+                            if not isinstance(record, dict):
+                                source_records_rejected += 1
+                                continue
+
+                            # Stage 5: Sysmon & Zeek Adapters -> Stage 6: Normalized Event Model
+                            events = StructuredLogParser.parse_line(
+                                data=record,
+                                source_id=source_id,
+                                source_type=manifest_type,
+                                file_rel=rel_file,
+                                line_idx=line_idx,
+                            )
+                            if events:
+                                source_records_parsed += 1
+                                all_events.extend(events)
+                                # Store raw record and original line text in vault
+                                record["_raw_line"] = line_str
+                                for ev in events:
+                                    kg.raw_record_vault[(ev.source_id, ev.record_id)] = record
+                            else:
+                                source_records_rejected += 1
+                        except json.JSONDecodeError:
+                            source_records_rejected += 1
+                            continue
 
         print(f"    [+] Normalized {len(all_events)} structured telemetry events across Purdue zones.")
 

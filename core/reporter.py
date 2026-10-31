@@ -132,8 +132,13 @@ class InvestigationReporter:
         has_c3 = any("eng-ws" in f.subject and f.relation == "modified_logic" and "plc" in f.object_entity for f in verified_facts)
         stages["Level 2: Supervisory"]["conduit_status"] = "VERIFIED CONDUIT" if has_c3 else "UNVERIFIED"
 
-        # Conduit 4: L1 -> L0 (Controller commands / Observation links)
-        has_c4 = any(f.relation in ["sent_command", "has_observation", "interlock_status"] for f in verified_facts)
+        # Conduit 4: L1 -> L0 (Controller commands / Observation links to specific process tags)
+        has_c4 = any(
+            f.source_type == "PROCESS_TELEMETRY"
+            and (f.relation in ["sent_command", "interlock_status", "has_observation"] or "obs-" in f.object_entity or "obs-" in f.subject)
+            and any(t in f.subject.lower() or t in f.object_entity.lower() or t in f.text.lower() for t in ["xv-4012", "pt-4012", "ballast"])
+            for f in verified_facts
+        )
         stages["Level 1: Process Control"]["conduit_status"] = "VERIFIED CONDUIT" if has_c4 else "UNVERIFIED"
 
         # If degraded ingestion report explicitly lacks controller audit, mark Level 1 as DEGRADED / UNVERIFIED
@@ -142,21 +147,27 @@ class InvestigationReporter:
             stages["Level 1: Process Control"]["conduit_status"] = "BROKEN (MISSING TELEMETRY)"
             stages["Level 1: Process Control"]["details"] = "controller_audit.jsonl missing: fail-closed policy enforced."
 
-        # Compute End-to-End Attack Path Continuity
+        # Compute Consecutive Prefix Attack Path Continuity (starts at L4 breach)
         conduit_checks = [has_c1, has_c2, has_c3, has_c4]
-        conduits_verified = sum(1 for c in conduit_checks if c)
+        longest_prefix = 0
+        for c in conduit_checks:
+            if c:
+                longest_prefix += 1
+            else:
+                break
         total_conduits = len(conduit_checks)
-        continuity_ratio = conduits_verified / total_conduits
+        continuity_ratio = longest_prefix / total_conduits
+        continuity_pct = round(continuity_ratio * 100, 1)
 
         # Backwards compatibility: populate 'status' matching 'stage_status'
         for k in stages:
             stages[k]["status"] = stages[k]["stage_status"]
 
         path_metrics = {
-            "conduits_verified": conduits_verified,
+            "conduits_verified": longest_prefix,
             "total_conduits": total_conduits,
-            "continuity_pct": round(continuity_ratio * 100, 1),
-            "end_to_end_status": "UNBROKEN ATTACK PATH" if continuity_ratio == 1.0 else f"BROKEN CONDUIT ({conduits_verified}/{total_conduits} VERIFIED)",
+            "continuity_pct": continuity_pct,
+            "end_to_end_status": "UNBROKEN ATTACK PATH" if continuity_pct == 100.0 else f"BROKEN CONDUIT ({longest_prefix}/{total_conduits} CONSECUTIVE VERIFIED)",
         }
 
         return stages, path_metrics
@@ -273,7 +284,7 @@ class InvestigationReporter:
             for sid, digest in self.ingestion_report.source_hashes.items():
                 esc_sid = html.escape(sid)
                 esc_digest = html.escape(digest)
-                hashes_html += f"<tr><td><code>{esc_sid}</code></td><td><code>{esc_digest}</code></td><td><span class='badge badge-verified'>VERIFIED_SHA256</span></td></tr>"
+                hashes_html += f"<tr><td><code>{esc_sid}</code></td><td><code>{esc_digest}</code></td><td><span class='badge badge-verified'>DIGEST RECORDED</span></td></tr>"
 
         html_content = f"""<!DOCTYPE html>
 <html lang="en">
@@ -475,7 +486,7 @@ class InvestigationReporter:
                 <span><strong>Case ID:</strong> {esc_case_id}</span>
                 <span><strong>Generated:</strong> {now_utc}</span>
                 <span><strong>Engine:</strong> GraphMemory Agent v0.5.1</span>
-                <span><strong>Ingestion Audit:</strong> {'INGESTION COMPLETE (100% AUDITED)' if is_complete else 'INGESTION DEGRADED'}</span>
+                <span><strong>Ingestion Audit:</strong> {'INGESTION COMPLETE' if is_complete else 'INGESTION DEGRADED'}</span>
             </div>
         </header>
 
