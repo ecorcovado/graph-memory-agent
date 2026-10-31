@@ -1,0 +1,75 @@
+{
+  "scenario": "Project Aegis Purdue IT-to-OT Intrusion",
+  "ordered_path": [
+    {
+      "step": 1,
+      "purdue_level": 4,
+      "source_node": "corp-ws-019",
+      "relation": "communicated_with",
+      "target_node": "203.0.113.88",
+      "classification": "OBSERVED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "mitre_ics_technique": "T0886 (Remote Services) / T0885 (Commonly Used Port)"
+    },
+    {
+      "step": 2,
+      "purdue_level": 3.5,
+      "source_node": "corp-ws-019",
+      "relation": "connected_to",
+      "target_node": "dmz-hist-mirror",
+      "classification": "OBSERVED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "mitre_ics_technique": "T0886 (Remote Services)"
+    },
+    {
+      "step": 3,
+      "purdue_level": 3,
+      "source_node": "dmz-hist-mirror",
+      "relation": "connected_to",
+      "target_node": "l3-hist-srv01",
+      "classification": "OBSERVED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "mitre_ics_technique": "T0812 (Default Credentials) / Conduit Traversal"
+    },
+    {
+      "step": 4,
+      "purdue_level": 2,
+      "source_node": "dmz-hist-mirror",
+      "relation": "authenticated_to",
+      "target_node": "scada-ignition-gw01",
+      "classification": "OBSERVED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "mitre_ics_technique": "T0859 (Valid Accounts)"
+    },
+    {
+      "step": 5,
+      "purdue_level": 2,
+      "source_node": "scada-ignition-gw01",
+      "relation": "connected_to",
+      "target_node": "eng-ws-02",
+      "classification": "OBSERVED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "mitre_ics_technique": "T0886 (Remote Services)"
+    },
+    {
+      "step": 6,
+      "purdue_level": 1,
+      "source_node": "eng-ws-02",
+      "relation": "modified_logic",
+      "target_node": "plc-ballast-01",
+      "classification": "OBSERVED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "mitre_ics_technique": "T0843 (Program Download)"
+    },
+    {
+      "step": 7,
+      "purdue_level": 0,
+      "source_node": "plc-ballast-01",
+      "relation": "sent_command",
+      "target_node": "pt-4012",
+      "classification": "OBSERVED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "mitre_ics_technique": "T0836 (Modify Parameter) / T0826 (Loss of Safety)"
+    }
+  ]
+}

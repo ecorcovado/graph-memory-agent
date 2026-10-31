@@ -174,12 +174,16 @@ class GraphReaderAgent:
 
         is_none = new_clues.upper().strip() in ["NONE", "NONE.", "'NONE'", '"NONE"']
         if new_clues and not is_none:
+            primary_source_id = facts[0].source_id if facts and facts[0].source_id else "src_doc"
             self.notebook.add_note(
                 step=step,
                 source_node=current_node,
                 content=new_clues,
                 fact_ids=fact_ids,
                 source_excerpt=source_excerpt,
+                source_id=primary_source_id,
+                source_record_id=current_node,
+                source_location=f"Node:{current_node}",
             )
             self._log(f"STEP {step}: NOTEBOOK UPDATED", f"[{current_node}] ->\n{new_clues}")
         else:
@@ -208,13 +212,26 @@ class GraphReaderAgent:
         decision = self.llm.generate(prompt=decision_prompt, system=sys_prompt_dec, temperature=0.1).strip()
         self._log(f"STEP {step}: AGENT DECISION", decision)
 
-        # Explicit termination check: requires exact ACTION: TERMINATE or standalone keyword (avoids DO NOT TERMINATE bug)
-        if re.search(r"\bACTION:\s*TERMINATE\b", decision, re.IGNORECASE) or decision.strip().upper() == "TERMINATE":
-            return None, True
+        lines = [line.strip() for line in decision.splitlines() if line.strip()]
 
-        # Parse target neighbor from decision
-        match = re.search(r"(?:HOP\s*\|\s*|HOP:\s*|HOP\s+TO\s+)(.+)", decision, re.IGNORECASE)
-        target = match.group(1).strip().lower() if match else decision.strip().lower()
+        # Strict full-line termination check: requires exact full-line ACTION: TERMINATE
+        # Disallows match on phrases like 'Do not use ACTION: TERMINATE' or loose 'TERMINATE'
+        for line in lines:
+            if re.fullmatch(r"ACTION:\s*TERMINATE", line, re.IGNORECASE):
+                return None, True
+
+        # Parse target neighbor from structured action line
+        target = None
+        for line in lines:
+            hop_match = re.fullmatch(r"ACTION:\s*HOP\s*\|\s*(.+)", line, re.IGNORECASE)
+            if hop_match:
+                target = hop_match.group(1).strip().lower()
+                break
+
+        # Resilient fallback parser if model deviated slightly from format
+        if not target:
+            match = re.search(r"(?:HOP\s*\|\s*|HOP:\s*|HOP\s+TO\s+)(.+)", decision, re.IGNORECASE)
+            target = match.group(1).strip().lower() if match else decision.strip().lower()
 
         # Strict exact match against unvisited neighbors (disallows ambiguous substrings or visited loops)
         if target in unvisited_neighbors:
@@ -267,7 +284,7 @@ class GraphReaderAgent:
         answer = self.llm.generate(prompt=prompt, system=sys_prompt, temperature=0.1)
 
         # Deterministic Evidence Verification Check (Fail-Closed, supports hash-prefixed and ordinal IDs)
-        cited_fact_ids = set(re.findall(r"\b([a-f0-9]{6}_C\d+_F\d+|C\d+_F\d+)\b", answer))
+        cited_fact_ids = set(re.findall(r"\b([a-f0-9]+_C\d+_F\d+|C\d+_F\d+)\b", answer))
         invalid_citations = cited_fact_ids - verified_fact_ids
 
         if invalid_citations:

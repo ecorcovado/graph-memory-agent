@@ -1,0 +1,1 @@
+{"timestamp": "2026-10-28T10:48:00Z", "gateway": "DMZ-GW01", "session_id": "RDP-SES-9941", "client_ip": "10.10.4.19", "target_host": "DMZ-JUMP-HOST", "account": "corp\\svc_historian_sync", "authentication_result": "SUCCESS", "protocol": "RDP", "evidence_basis": "DIRECT_TELEMETRY"}

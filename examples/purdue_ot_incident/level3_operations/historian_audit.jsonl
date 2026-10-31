@@ -1,0 +1,1 @@
+{"timestamp": "2026-10-28T11:30:00Z", "host": "L3-HIST-SRV01", "purdue_level": 3, "service": "OSISoft_PI_Archive", "peer_node": "DMZ-HIST-MIRROR", "operation": "TAG_REPLICATION_SYNC", "transferred_tags": ["PT_4012_PRES", "XV_4012_VALVE_POS", "PLC_01_HEARTBEAT"], "evidence_basis": "DIRECT_TELEMETRY"}

@@ -1,0 +1,1 @@
+{"timestamp": "2026-10-28T10:52:14Z", "host": "DMZ-HIST-MIRROR", "service": "HistorianDataBroker", "account": "svc_historian_sync", "operation": "SQL_QUERY_EXPORT", "query": "SELECT tag_name, controller_ip, modbus_register, threshold_high FROM plant_tags WHERE critical_safety=1", "records_returned": 1420, "client_ip": "10.10.4.19", "evidence_basis": "DIRECT_TELEMETRY"}

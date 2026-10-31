@@ -54,12 +54,12 @@ This project runs **100% locally** via Ollama. It extracts a directed `MultiDiGr
 
 ## Key Technical Guardrails
 
-* **Directed MultiDiGraph with Strict Forensic Tiers:** Distinguishes relationship directions (`Host -> communicated_with -> IP` vs reverse) and enforces strict exact allowlists for forensic classifications (`OBSERVED`, `INTELLIGENCE_REPORTED`, `CO_OCCURRENCE`). Substrings like `not_executed` strictly default to `UNCLASSIFIED`, and unannotated edges are never presumed observed.
-* **Centralized Prompt Budget Assembler:** 100% of LLM calls (including fact extraction) pass through `PromptBudgetManager.assemble_prompt()` to strictly allocate context budgets (system instructions: 400t, query/plan: 300t, notebook: 1,000t, context: 1,300t, instructions: 200t, output reserve: 500t) and clamp candidate nodes to guarantee requests never exceed 4,096 tokens.
-* **Bounded Provenance Memory (`EvidenceNote`):** Enforces a 1,000-token budget with immutable `frozen=True` dataclasses, collision-resistant SHA-256 chunk-hashed `fact_ids` (`f"{doc_hash}_C{chunk_id}_F{counter}"`), multi-source provenance tuples (`source_nodes: Tuple[str, ...]`, `source_excerpts: Tuple[str, ...]`), per-note clamping, FIFO eviction, and **multi-source provenance-preserving deduplication** (merging fact IDs, source nodes, and source excerpts across multiple references rather than discarding secondary evidence).
-* **Explicit Context & Output Limits:** Passes `"options": {"num_ctx": 4096, "num_predict": 500}` directly to the Ollama API.
-* **Resilient Node Selection & Forensic Routing:** Disallows ambiguous substring target matching and empty-string false matches; strictly isolates biographical predicates to intelligence tiers; requires regex-bounded termination (`\bACTION:\s*TERMINATE\b`) to prevent false terminations on phrases like "DO NOT TERMINATE"; and diverts visited loops via forensic edge rank (`OBSERVED` prioritized over `CO_OCCURRENCE`).
-* **Deterministic Fail-Closed Evidence Verification:** Synthesized answers are audited against verified fact IDs. If the model cites fabricated fact IDs or provides uncited claims, the system **fails closed** and returns `INSUFFICIENT EVIDENCE`.
+* **Directed MultiDiGraph with Strict Forensic Tiers & Separated Evidence Basis:** Distinguishes relationship directions (`Host -> communicated_with -> IP` vs reverse) and enforces strict allowlists for forensic classifications (`OBSERVED`, `INTELLIGENCE_REPORTED`, `CO_OCCURRENCE`, `UNCLASSIFIED`). Crucially separates **predicate semantics** (what happened, e.g. `executed`) from **evidence basis** (how it is known, e.g. `DIRECT_TELEMETRY` vs `ANALYST_REPORTED`), ensuring telemetry events are distinguished from report narratives.
+* **Document-Level Provenance & Collision-Resistant Fact IDs:** Generates stable fact IDs derived from the SHA-256 hash of the source document (`f"{source_id}_C{chunk_id:04d}_F{fact_counter:04d}"`), and stores the full SHA-256 digest in `kg.source_hashes` for post-investigation independent auditing.
+* **Fully Linked Provenance Memory (`SourceReference`):** Working memory entries (`EvidenceNote`) contain immutable `SourceReference` records explicitly linking `source_id`, `source_record_id`, `fact_ids`, `source_location`, and exact textual `excerpt`. Corroborating duplicate summaries merges references without losing individual record provenance.
+* **Bounded Prompt Construction & Explicit Context Ceilings:** Prompt assembly routes through `PromptBudgetManager` using conservative character-based heuristic budgeting (4 chars/token) alongside explicit Ollama API constraints (`"options": {"num_ctx": 4096, "num_predict": 500}`).
+* **Strict Action Parsing & Resilient Forensic Routing:** Traversal decisions require exact full-line action matching (`re.fullmatch(r"ACTION:\s*TERMINATE", line)`), preventing false terminations from conversational context (e.g. *"Do not use ACTION: TERMINATE"*). Fallback hops route based on edge forensic tier priority (`OBSERVED` > `INTELLIGENCE_REPORTED` > `CO_OCCURRENCE`).
+* **Deterministic Fail-Closed Evidence Verification:** Synthesized answers are audited against gathered fact IDs. If the model cites fabricated fact IDs or provides uncited claims, the system **fails closed** and returns `INSUFFICIENT EVIDENCE`.
 
 ---
 
@@ -86,7 +86,10 @@ python run_agent.py --model qwen2.5-coder:7b
 # 2. Run against the DFIR incident report
 python run_agent.py --file examples/cyber_incident_report.txt --question "What persistence scheduled task is associated with the threat group communicating with WORKSTATION-402?"
 
-# 3. Run offline unit tests
+# 3. Run against Project Aegis (OT/ICS Purdue Reference Incident)
+python run_agent.py --file examples/purdue_ot_incident/incident_overview.txt --question "Which PLC was modified and what safety interlock was bypassed following the enterprise compromise?"
+
+# 4. Run offline unit tests (20 passing tests)
 python -m unittest tests/test_components.py
 ```
 
@@ -144,14 +147,24 @@ The persistence scheduled task associated with the threat group communicating wi
 ```
 graph-memory-agent/
 ├── core/
-│   ├── budget_manager.py  # Central prompt budget manager (enforces 4K token ceiling)
-│   ├── graph_builder.py   # Ollama client, triple extractor, and NetworkX MultiDiGraph
-│   ├── notebook.py        # Bounded provenance memory with EvidenceNotes & FIFO eviction
-│   └── agent.py           # Rational planner, node explorer, and evidence verifier
+│   ├── budget_manager.py  # Prompt budget manager (4K token context bounds)
+│   ├── graph_builder.py   # Document SHA-256 hashes, typed triples, and NetworkX MultiDiGraph
+│   ├── notebook.py        # Linked SourceReference memory with provenance-preserving merging
+│   └── agent.py           # Rational planner, full-line action parser, and fail-closed verifier
 ├── examples/
-│   └── cyber_incident_report.txt # DFIR incident triage scenario
+│   ├── cyber_incident_report.txt  # DFIR incident triage scenario
+│   └── purdue_ot_incident/        # Project Aegis synthetic OT/ICS intrusion bundle
+│       ├── case_manifest.json     # Case metadata (NIST SP 800-82 Rev. 3 & MITRE ATT&CK for ICS v20.0)
+│       ├── incident_overview.txt  # Narrative incident report across Purdue Levels 4 -> 0
+│       ├── enterprise/            # Level 4 Sysmon & Windows Security JSONL logs
+│       ├── industrial_dmz/        # Level 3.5 DMZ Firewall, RDP, and Historian Mirror logs
+│       ├── level3_operations/     # Level 3 Plant Historian audit logs
+│       ├── level2_scada/          # Level 2 SCADA Gateway & Engineering Workstation logs
+│       ├── level1_plc/            # Level 1 Controller CIP program download audit logs
+│       ├── level0_process/        # Level 0 Sensor telemetry & safety valve trip events
+│       └── ground_truth/          # Benchmark expected paths, atomic facts, and fail-closed answers
 ├── tests/
-│   └── test_components.py # 15 offline unit tests (fail-closed auditing, allowlists, deduplication, regex termination, empty node selection)
+│   └── test_components.py # 20 offline unit tests (fail-closed auditing, SourceReference linking, full-line parsing)
 ├── run_agent.py           # CLI entry point
 └── README.md
 ```
@@ -163,11 +176,16 @@ graph-memory-agent/
 * [x] Directed `MultiDiGraph` with typed relationship predicates
 * [x] Strict 4K token budget enforcement in Notebook memory
 * [x] Evidence verification chain on final answers
-* [ ] **OT/ICS Security (Purdue Model):** Ingest industrial control logs correlating Level 2 SCADA/HMI commands, Level 3.5 DMZ jump-hosts, and Level 1 PLC logic modifications.
-* [ ] **Structured Log Parsers:** Ingestion for Sysmon JSON and Windows Event Logs (EVTX).
-* [ ] **MITRE ATT&CK & ATT&CK for ICS:** Direct mapping of observed graph edges to ATT&CK techniques.
+* [x] **Project Aegis:** Synthetic Purdue Model OT/ICS intrusion bundle (Levels 4 through 0) aligned to NIST SP 800-82 Rev. 3 & MITRE ATT&CK for ICS v20.0 (Oct 2026)
+* [x] Document-level SHA-256 source identity and zero-padded fact IDs
+* [x] Linked `SourceReference` immutable memory structures
+* [x] Architectural separation of predicates from evidence bases (`DIRECT_TELEMETRY` vs `ANALYST_REPORTED`)
+* [ ] **Structured Log Parsers:** Automated ingestion for Sysmon JSON, Windows Event Logs (EVTX), and Zeek conn logs.
+* [ ] **Automated ATT&CK Mapping:** Direct lookup mapping of observed edges to MITRE ATT&CK for ICS v20.0 technique IDs.
 
 ---
 
-## Reference
+## References
 - Li et al., *"GraphReader: Building Graph-based Agent to Enhance Long-Context Abilities of Large Language Models"*, arXiv:2406.14550 (2024).
+- NIST Special Publication 800-82 Revision 3, *"Guide to Operational Technology (OT) Security"* (2023/2026).
+- MITRE ATT&CK® for Industrial Control Systems (ICS), Version 20.0 (Released October 13, 2026).

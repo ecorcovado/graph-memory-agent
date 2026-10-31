@@ -1,7 +1,7 @@
 """
 Central Prompt Budget Manager for Graph Memory Agent.
-Enforces strict 4,096-token context allocation limits across all prompt components
-and provides centralized, validated prompt assembly before calling LLM endpoints.
+Provides bounded prompt construction using conservative character-based heuristic estimates
+(4 chars per token) and explicit Ollama model context/output ceilings (num_ctx: 4096, num_predict: 500).
 """
 
 from typing import Dict, List, Optional, Tuple
@@ -9,8 +9,9 @@ from typing import Dict, List, Optional, Tuple
 
 class PromptBudgetManager:
     """
-    Allocates, clamps, and validates prompt components to guarantee total prompt
-    and model generation strictly stay within a 4,096-token context window.
+    Allocates, clamps, and validates prompt components using conservative character-based
+    heuristic budgeting (4 chars/token) to guarantee total prompt and generation stay within
+    the explicit 4,096-token Ollama context ceiling.
     """
 
     TOTAL_CONTEXT = 4096

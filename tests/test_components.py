@@ -5,17 +5,22 @@ fail-closed evidence auditing, multi-source provenance merging, and budget assem
 """
 
 import unittest
-from core.notebook import Notebook, EvidenceNote
-from core.graph_builder import AtomicFact, KnowledgeGraph, normalize_entity, classify_relation, GraphBuilder
+from core.notebook import Notebook, EvidenceNote, SourceReference
+from core.graph_builder import (
+    AtomicFact, KnowledgeGraph, normalize_entity, classify_relation,
+    classify_relation_forensics, ForensicRelation, GraphBuilder,
+    EVIDENCE_BASIS_TELEMETRY, EVIDENCE_BASIS_REPORTED, EVIDENCE_BASIS_INTEL,
+)
 from core.budget_manager import PromptBudgetManager
 from core.agent import GraphReaderAgent
 
 
 class MockOllamaClient:
     """Mock LLM client for offline deterministic unit testing."""
-    def __init__(self, responses=None):
+    def __init__(self, responses=None, model="mock-model"):
         self.responses = responses or {}
         self.call_history = []
+        self.model = model
 
     def generate(self, prompt: str, temperature: float = 0.1, system: str = "") -> str:
         self.call_history.append((system, prompt))
@@ -257,6 +262,132 @@ class TestGraphMemoryAgent(unittest.TestCase):
         answer = agent.synthesize_answer("What task was used?")
         self.assertIn("INSUFFICIENT EVIDENCE", answer)
         self.assertIn("no verifiable citations", answer)
+
+
+    def test_document_level_source_hash_and_fact_ids(self):
+        client = MockOllamaClient(responses={"Text to Deconstruct": "Process executed | host01 | executed | payload.exe"})
+        builder = GraphBuilder(client)
+        sample_doc = "Initial incident log line.\nProcess executed on host01."
+        kg = builder.build_graph(sample_doc)
+
+        # 1. Document SHA-256 must be calculated and stored
+        import hashlib
+        expected_sha = hashlib.sha256(sample_doc.encode("utf-8")).hexdigest()
+        source_id = list(kg.source_hashes.keys())[0]
+        self.assertEqual(kg.source_hashes[source_id], expected_sha)
+
+        # 2. Fact ID must incorporate document source ID and zero-padded ordinals
+        self.assertTrue(len(kg.atomic_facts) > 0)
+        first_fact_id = list(kg.atomic_facts.keys())[0]
+        self.assertTrue(first_fact_id.startswith(source_id))
+        self.assertIn("_C0000_F0001", first_fact_id)
+
+    def test_source_reference_linking_in_evidence_notes(self):
+        nb = Notebook(max_tokens=500)
+        ref1 = SourceReference(
+            source_id="sha_doc_1",
+            source_record_id="sysmon_evt_101",
+            fact_ids=("fact_01", "fact_02"),
+            excerpt="powershell.exe executed with EncodedCommand",
+            source_location="CORP-WS-019",
+        )
+        nb.add_note(
+            step=1,
+            content="Host executed obfuscated PowerShell.",
+            source_refs=[ref1],
+        )
+
+        self.assertEqual(len(nb.notes), 1)
+        note = nb.notes[0]
+        # Direct linked SourceReference verification
+        self.assertEqual(len(note.source_refs), 1)
+        self.assertEqual(note.source_refs[0].source_id, "sha_doc_1")
+        self.assertEqual(note.source_refs[0].source_record_id, "sysmon_evt_101")
+        self.assertIn("fact_01", note.source_refs[0].fact_ids)
+        # Helper property compatibility
+        self.assertIn("CORP-WS-019", note.source_nodes)
+        self.assertIn("fact_01", note.fact_ids)
+
+    def test_separated_predicate_and_evidence_basis(self):
+        # 1. Telemetry vs Report differentiation
+        tier_tel, basis_tel = classify_relation_forensics("executed", source_type="SYSMON_EVENT")
+        self.assertEqual(tier_tel, "OBSERVED")
+        self.assertEqual(basis_tel, EVIDENCE_BASIS_TELEMETRY)
+
+        tier_rep, basis_rep = classify_relation_forensics("executed", source_type="INCIDENT_REPORT")
+        self.assertEqual(tier_rep, "OBSERVED")
+        self.assertEqual(basis_rep, EVIDENCE_BASIS_REPORTED)
+
+        # 2. Intelligence attribution differentiation
+        tier_intel, basis_intel = classify_relation_forensics("attributed_to")
+        self.assertEqual(tier_intel, "INTELLIGENCE_REPORTED")
+        self.assertEqual(basis_intel, EVIDENCE_BASIS_INTEL)
+
+        # 3. ForensicRelation tuple backward compatibility (unpackable as 4 items)
+        rel = ForensicRelation("outgoing", "executed", "OBSERVED", "proc.exe", evidence_basis=basis_tel, source_type="SYSMON_EVENT")
+        direction, predicate, classification, target = rel
+        self.assertEqual(direction, "outgoing")
+        self.assertEqual(predicate, "executed")
+        self.assertEqual(classification, "OBSERVED")
+        self.assertEqual(target, "proc.exe")
+        self.assertEqual(rel.evidence_basis, EVIDENCE_BASIS_TELEMETRY)
+        self.assertEqual(rel.source_type, "SYSMON_EVENT")
+
+    def test_strict_full_line_action_parsing_negative_case(self):
+        kg = KnowledgeGraph()
+        kg.graph.add_node("plc-controller-01")
+        kg.graph.add_node("dmz-historian")
+        kg.graph.add_edge("dmz-historian", "plc-controller-01", relation="connected_to", classification="OBSERVED")
+
+        # Response contains "Do not use ACTION: TERMINATE." followed by a valid HOP action
+        complex_decision = (
+            "Do not use ACTION: TERMINATE.\n"
+            "Continue investigating the PLC.\n"
+            "ACTION: HOP | plc-controller-01"
+        )
+        client = MockOllamaClient(responses={"Decision": complex_decision})
+        agent = GraphReaderAgent(client, kg)
+
+        next_node, should_terminate = agent.explore_node(
+            current_node="dmz-historian",
+            question="Where did the lateral movement go?",
+            plan="Trace connection to PLC",
+            step=1,
+            visited_nodes={"dmz-historian"},
+        )
+        # Must NOT terminate, and must successfully hop to plc-controller-01
+        self.assertFalse(should_terminate)
+        self.assertEqual(next_node, "plc-controller-01")
+
+    def test_purdue_case_manifest_and_ground_truth_integrity(self):
+        import json
+        import os
+
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        manifest_path = os.path.join(base_dir, "examples", "purdue_ot_incident", "case_manifest.json")
+        self.assertTrue(os.path.exists(manifest_path), f"Manifest missing at {manifest_path}")
+
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+
+        self.assertEqual(manifest["case_id"], "AEGIS-OT-2026-001")
+        self.assertEqual(manifest["compliance_frameworks"][0]["name"], "NIST SP 800-82 Rev. 3")
+        self.assertEqual(manifest["compliance_frameworks"][1]["name"], "MITRE ATT&CK for ICS v20.0")
+
+        # Verify all evidence files exist
+        purdue_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        for category, files in manifest["evidence_sources"].items():
+            for rel_file in files:
+                file_path = os.path.join(purdue_dir, rel_file)
+                self.assertTrue(os.path.exists(file_path), f"Evidence source file missing: {file_path}")
+
+        # Verify expected attack path has 7 unbroken steps spanning Level 4 to Level 0
+        attack_path_file = os.path.join(purdue_dir, manifest["ground_truth"]["expected_attack_path"])
+        with open(attack_path_file, "r", encoding="utf-8") as f:
+            attack_path = json.load(f)
+        self.assertEqual(len(attack_path["ordered_path"]), 7)
+        self.assertEqual(attack_path["ordered_path"][0]["purdue_level"], 4)
+        self.assertEqual(attack_path["ordered_path"][-1]["purdue_level"], 0)
 
 
 if __name__ == "__main__":

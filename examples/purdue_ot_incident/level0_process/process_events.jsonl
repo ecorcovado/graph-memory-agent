@@ -1,0 +1,2 @@
+{"timestamp": "2026-10-28T15:05:00Z", "tag_id": "PT-4012", "description": "Ballast Manifold Pressure Transmitter", "purdue_level": 0, "value_bar": 12.4, "normal_range": "4.0 - 8.5 bar", "high_alarm_threshold": 10.0, "trip_state": "ALARM_ACTIVE", "evidence_basis": "DIRECT_TELEMETRY"}
+{"timestamp": "2026-10-28T15:05:02Z", "tag_id": "XV-4012", "description": "Emergency Pneumatic Dump Valve", "purdue_level": 0, "commanded_state": "OPEN_INHIBITED", "actual_state": "CLOSED", "interlock_status": "SUPPRESSED_BY_PLC_LOGIC", "evidence_basis": "DIRECT_TELEMETRY"}

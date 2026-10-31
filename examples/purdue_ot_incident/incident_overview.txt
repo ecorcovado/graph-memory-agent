@@ -1,0 +1,19 @@
+INCIDENT OVERVIEW: PROJECT AEGIS IT-TO-OT LATERAL INTRUSION
+Target Environment: Pilbara Bulk Minerals Port Facility (Western Australia)
+Architecture Standard: Purdue Enterprise Reference Architecture (ISA-95) & NIST SP 800-82 Rev. 3
+Incident Timeframe: 28 October 2026 08:14 UTC - 28 October 2026 15:10 UTC
+
+1. Enterprise Initial Compromise (Level 4 Enterprise IT)
+At 08:14 UTC, enterprise workstation CORP-WS-019 operated by senior process planner corp\j.miller opened a weaponized macro spreadsheet titled Q4_Budget_Review.xlsm. Sysmon event logs record that Microsoft Excel spawned an obfuscated powershell.exe process executing an encoded stager command. The infected host CORP-WS-019 established an external HTTPS command-and-control beacon to external adversary IP 203.0.113.88. Cyber threat intelligence attributes IP 203.0.113.88 to the industrial threat group DEV-HEXANE.
+
+2. Industrial DMZ Breach & Historian Mirror Pivot (Level 3.5 Industrial DMZ)
+At 10:45 UTC, DEV-HEXANE used compromised internal service credentials for account svc_historian_sync from CORP-WS-019. The adversary initiated an anomalous TLS session across the boundary firewall PERA-DMZ-FW01 to the DMZ Historian Mirror server DMZ-HIST-MIRROR (10.10.35.10) over port 8088. DMZ-HIST-MIRROR acts as the external data broker for enterprise reporting and is dual-homed. The adversary executed an unauthorized SQL export on DMZ-HIST-MIRROR, dumping active SCADA tag schema definitions and IP address maps for internal Level 3 operations.
+
+3. Plant Operations & SCADA Gateway Penetration (Level 3 Operations & Level 2 Supervisory)
+At 11:30 UTC, the adversary pivoted from DMZ-HIST-MIRROR across the internal industrial conduit into the primary plant historian L3-HIST-SRV01 located inside Level 3 Operations Systems. Leveraging the harvested SCADA network routes, at 13:10 UTC the adversary opened an authenticated session to the Central SCADA Gateway SCADA-IGNITION-GW01 (10.10.20.5) in Level 2 Supervisory Control. From SCADA-IGNITION-GW01, the adversary moved laterally into the terminal Engineering Workstation ENG-WS-02 using cached administrative workstation tokens.
+
+4. Unauthorized PLC Logic Download & Safety Interlock Invalidation (Level 1 Basic Control)
+At 14:22 UTC, Engineering Workstation ENG-WS-02 initiated an unauthorized Common Industrial Protocol (CIP) download session over Ethernet/IP to field controller PLC-BALLAST-01 (Rockwell ControlLogix 1756-L83E, IP 10.10.10.22) in Level 1. The adversary downloaded a modified control program modifying routine Safety_Interlock_Bypass. Controller audit logs verify the program modification altered the controller signature hash from 0x4A1F to 0x9E7B, suppressing the high-pressure automatic emergency trip logic.
+
+5. Physical Process Anomaly & Loss of Safety Function (Level 0 Physical Process)
+At 15:05 UTC, process telemetry recorded ballast line pressure transmitter PT-4012 spiking to 12.4 bar, exceeding the maximum safe threshold of 10.0 bar. Because the safety interlock was bypassed in PLC-BALLAST-01, emergency pneumatic dump valve XV-4012 failed to actuate, resulting in a physical line over-pressurization alarm in the port pumping manifold.

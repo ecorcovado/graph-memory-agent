@@ -34,6 +34,14 @@ INTELLIGENCE_PREDICATES = {
     "founded_inside", "architected", "worked_at", "previously_worked_at", "affiliated_with",
 }
 
+# Forensic Evidence Basis constants (separates what happened from how it is known)
+EVIDENCE_BASIS_TELEMETRY = "DIRECT_TELEMETRY"
+EVIDENCE_BASIS_REPORTED = "ANALYST_REPORTED"
+EVIDENCE_BASIS_INTEL = "THREAT_INTELLIGENCE"
+EVIDENCE_BASIS_INFERRED = "INFERRED"
+EVIDENCE_BASIS_CO_OCCURRENCE = "CO_OCCURRENCE"
+EVIDENCE_BASIS_UNCLASSIFIED = "UNCLASSIFIED"
+
 
 def classify_relation(relation: str) -> str:
     """
@@ -53,15 +61,86 @@ def classify_relation(relation: str) -> str:
     return "UNCLASSIFIED"
 
 
+def classify_relation_forensics(
+    relation: str,
+    source_type: str = "INCIDENT_REPORT",
+    evidence_basis: Optional[str] = None,
+) -> Tuple[str, str]:
+    """
+    Separates predicate semantics (what happened) from evidence basis (how it is known).
+    Returns (classification_tier, evidence_basis).
+    - Tier: OBSERVED, INTELLIGENCE_REPORTED, CO_OCCURRENCE, UNCLASSIFIED
+    - Evidence Basis: DIRECT_TELEMETRY, ANALYST_REPORTED, THREAT_INTELLIGENCE, CO_OCCURRENCE, UNCLASSIFIED
+    """
+    tier = classify_relation(relation)
+    if evidence_basis:
+        basis = evidence_basis
+    elif tier == "CO_OCCURRENCE":
+        basis = EVIDENCE_BASIS_CO_OCCURRENCE
+    elif source_type in [
+        "SYSMON_EVENT", "WINDOWS_SECURITY", "FIREWALL_LOG",
+        "SCADA_AUDIT", "CONTROLLER_AUDIT", "PROCESS_TELEMETRY", "ZEEK_FLOW"
+    ]:
+        basis = EVIDENCE_BASIS_TELEMETRY if tier == "OBSERVED" else EVIDENCE_BASIS_REPORTED
+    elif tier == "INTELLIGENCE_REPORTED":
+        basis = EVIDENCE_BASIS_INTEL
+    elif tier == "OBSERVED":
+        basis = EVIDENCE_BASIS_REPORTED if source_type == "INCIDENT_REPORT" else EVIDENCE_BASIS_TELEMETRY
+    else:
+        basis = EVIDENCE_BASIS_UNCLASSIFIED
+
+    return tier, basis
+
+
+class ForensicRelation(tuple):
+    """
+    4-tuple (direction, relation, classification, target) with extended metadata attributes
+    (.evidence_basis, .source_type, .fact_id) ensuring 100% backwards compatibility with 4-tuple unpacking.
+    """
+    def __new__(
+        cls,
+        direction: str,
+        relation: str,
+        classification: str,
+        target: str,
+        evidence_basis: str = "UNCLASSIFIED",
+        source_type: str = "INCIDENT_REPORT",
+        fact_id: str = "",
+    ):
+        return super().__new__(cls, (direction, relation, classification, target))
+
+    def __init__(
+        self,
+        direction: str,
+        relation: str,
+        classification: str,
+        target: str,
+        evidence_basis: str = "UNCLASSIFIED",
+        source_type: str = "INCIDENT_REPORT",
+        fact_id: str = "",
+    ):
+        self.direction = direction
+        self.relation = relation
+        self.classification = classification
+        self.target = target
+        self.evidence_basis = evidence_basis
+        self.source_type = source_type
+        self.fact_id = fact_id
+
+
 @dataclass
 class AtomicFact:
     fact_id: str
     chunk_id: int
     text: str
+    source_id: str = ""
     subject: str = ""
     relation: str = "related_to"
     object_entity: str = ""
     key_elements: List[str] = field(default_factory=list)
+    evidence_basis: str = "UNCLASSIFIED"
+    source_type: str = "INCIDENT_REPORT"
+    confidence: str = "HIGH"
 
 
 @dataclass
@@ -71,11 +150,13 @@ class KnowledgeGraph:
     atomic_facts: Dict[str, AtomicFact] = field(default_factory=dict)
     # Map key element (normalized) -> list of fact_ids
     node_to_facts: Dict[str, List[str]] = field(default_factory=dict)
+    # Map source_id -> full SHA-256 digest for document verification
+    source_hashes: Dict[str, str] = field(default_factory=dict)
 
-    def get_neighbors_with_relations(self, node: str) -> List[Tuple[str, str, str, str]]:
+    def get_neighbors_with_relations(self, node: str) -> List[ForensicRelation]:
         """
-        Returns list of (direction, relation, classification, connected_node).
-        Distinguishes OBSERVED events from INTELLIGENCE_REPORTED or CO_OCCURRENCE.
+        Returns list of ForensicRelation items unpackable as (direction, relation, classification, target)
+        with .evidence_basis and .source_type attributes.
         """
         results = []
         if not self.graph.has_node(node):
@@ -85,13 +166,29 @@ class KnowledgeGraph:
         for _, target, data in self.graph.out_edges(node, data=True):
             rel = data.get("relation", "connected_to")
             cls = data.get("classification", "UNCLASSIFIED")
-            results.append(("outgoing", rel, cls, target))
+            basis = data.get("evidence_basis", "UNCLASSIFIED")
+            src_type = data.get("source_type", "INCIDENT_REPORT")
+            fid = data.get("fact_id", "")
+            results.append(
+                ForensicRelation(
+                    "outgoing", rel, cls, target,
+                    evidence_basis=basis, source_type=src_type, fact_id=fid
+                )
+            )
 
         # Incoming edges: source -> node
         for source, _, data in self.graph.in_edges(node, data=True):
             rel = data.get("relation", "connected_to")
             cls = data.get("classification", "UNCLASSIFIED")
-            results.append(("incoming", rel, cls, source))
+            basis = data.get("evidence_basis", "UNCLASSIFIED")
+            src_type = data.get("source_type", "INCIDENT_REPORT")
+            fid = data.get("fact_id", "")
+            results.append(
+                ForensicRelation(
+                    "incoming", rel, cls, source,
+                    evidence_basis=basis, source_type=src_type, fact_id=fid
+                )
+            )
 
         return results
 
@@ -182,9 +279,16 @@ class GraphBuilder:
             chunks.append("\n\n".join(current_chunk))
         return chunks
 
-    def extract_atomic_facts(self, chunk: str, chunk_id: int) -> List[AtomicFact]:
+    def extract_atomic_facts(
+        self,
+        chunk: str,
+        chunk_id: int,
+        source_id: str = "src_doc",
+        source_type: str = "INCIDENT_REPORT",
+    ) -> List[AtomicFact]:
         """
         Prompts LLM to extract atomic facts and typed triples (Subject | Relation | Object).
+        Uses stable document-level source_id and zero-padded chunk and fact ordinals.
         """
         system_prompt = (
             "You are an expert DFIR and Knowledge Graph analyst. Deconstruct the given text into standalone atomic facts.\n"
@@ -213,7 +317,6 @@ class GraphBuilder:
         )
         raw_output = self.llm.generate(prompt=user_prompt, system=sys_prompt, temperature=0.1)
 
-        doc_hash = hashlib.sha256(chunk.encode("utf-8")).hexdigest()[:6]
         extracted_facts = []
         lines = raw_output.split("\n")
         fact_counter = 1
@@ -242,37 +345,55 @@ class GraphBuilder:
                     if norm_extra and norm_extra not in key_elements:
                         key_elements.append(norm_extra)
 
-                fact_id = f"{doc_hash}_C{chunk_id}_F{fact_counter}"
+                fact_id = f"{source_id}_C{chunk_id:04d}_F{fact_counter:04d}"
                 fact_counter += 1
+
+                tier, basis = classify_relation_forensics(relation, source_type=source_type)
 
                 extracted_facts.append(
                     AtomicFact(
                         fact_id=fact_id,
                         chunk_id=chunk_id,
                         text=fact_text,
+                        source_id=source_id,
                         subject=subject,
                         relation=relation,
                         object_entity=obj,
                         key_elements=key_elements,
+                        evidence_basis=basis,
+                        source_type=source_type,
                     )
                 )
 
         return extracted_facts
 
-    def build_graph(self, text: str) -> KnowledgeGraph:
+    def build_graph(
+        self,
+        text: str,
+        source_id: Optional[str] = None,
+        source_type: str = "INCIDENT_REPORT",
+    ) -> KnowledgeGraph:
         """
         End-to-end pipeline: Chunks text, extracts facts, links typed directed edges in NetworkX.
+        Stores full document SHA-256 for independent verification.
         """
+        full_doc_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        resolved_source_id = source_id or full_doc_sha[:32]
+
         chunks = self.chunk_text(text)
         kg = KnowledgeGraph()
+        kg.source_hashes[resolved_source_id] = full_doc_sha
         all_facts: List[AtomicFact] = []
 
-        print(f"[*] Processing {len(chunks)} chunks through local Ollama ({self.llm.model})...")
+        model_name = getattr(self.llm, "model", "local-llm")
+        print(f"[*] Processing {len(chunks)} chunks through local Ollama ({model_name})...")
+        print(f"    -> Document Source ID: {resolved_source_id}")
+        print(f"    -> SHA-256 Digest: {full_doc_sha}")
 
         for idx, chunk in enumerate(chunks):
             kg.chunks[idx] = chunk
             print(f"    -> Extracting atomic facts from Chunk {idx+1}/{len(chunks)}...")
-            facts = self.extract_atomic_facts(chunk, idx)
+            facts = self.extract_atomic_facts(chunk, idx, source_id=resolved_source_id, source_type=source_type)
             all_facts.extend(facts)
 
         # Index facts & nodes
@@ -295,8 +416,19 @@ class GraphBuilder:
             rel = fact.relation
 
             if u and v and u != v:
-                cls = classify_relation(rel)
-                kg.graph.add_edge(u, v, relation=rel, classification=cls, fact_id=fact.fact_id)
+                tier, basis = classify_relation_forensics(
+                    rel,
+                    source_type=fact.source_type,
+                    evidence_basis=fact.evidence_basis,
+                )
+                kg.graph.add_edge(
+                    u, v,
+                    relation=rel,
+                    classification=tier,
+                    evidence_basis=basis,
+                    source_type=fact.source_type,
+                    fact_id=fact.fact_id,
+                )
 
             # Secondary entity co-occurrence edges (explicitly tagged CO_OCCURRENCE)
             elems = [e for e in fact.key_elements if e]
@@ -308,6 +440,8 @@ class GraphBuilder:
                             e1, e2,
                             relation="co_occurs_with",
                             classification="CO_OCCURRENCE",
+                            evidence_basis=EVIDENCE_BASIS_CO_OCCURRENCE,
+                            source_type=fact.source_type,
                             fact_id=fact.fact_id,
                         )
 

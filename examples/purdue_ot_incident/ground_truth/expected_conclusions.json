@@ -1,0 +1,59 @@
+{
+  "benchmark_questions": [
+    {
+      "id": "Q1",
+      "category": "Basic Investigation",
+      "question": "Which enterprise workstation was compromised?",
+      "expected_answer": "CORP-WS-019",
+      "required_citations": ["enterprise/sysmon.jsonl", "enterprise/windows_security.jsonl"]
+    },
+    {
+      "id": "Q2",
+      "category": "Basic Investigation",
+      "question": "Which account was used?",
+      "expected_answer": "corp\\j.miller",
+      "required_citations": ["enterprise/sysmon.jsonl"]
+    },
+    {
+      "id": "Q3",
+      "category": "Basic Investigation",
+      "question": "Which external or internal systems did it contact?",
+      "expected_answer": "External C2 IP 203.0.113.88 and internal DMZ Historian Mirror DMZ-HIST-MIRROR (10.10.35.10).",
+      "required_citations": ["enterprise/sysmon.jsonl", "industrial_dmz/firewall.jsonl"]
+    },
+    {
+      "id": "Q4",
+      "category": "Multi-hop Investigation",
+      "question": "Was there a documented path from the enterprise environment to the historian mirror?",
+      "expected_answer": "Yes. Firewall PERA-DMZ-FW01 permitted outbound traffic from CORP-WS-019 (10.10.4.19) to DMZ-HIST-MIRROR (10.10.35.10) over port 8088.",
+      "required_citations": ["industrial_dmz/firewall.jsonl"]
+    },
+    {
+      "id": "Q5",
+      "category": "Multi-hop Investigation",
+      "question": "Is there evidence connecting the mirror to SCADA?",
+      "expected_answer": "Yes. SCADA gateway audit logs record an authenticated session opened from DMZ-HIST-MIRROR (10.10.35.10) to SCADA-IGNITION-GW01.",
+      "required_citations": ["level2_scada/scada_audit.jsonl"]
+    },
+    {
+      "id": "Q6",
+      "category": "Multi-hop Investigation",
+      "question": "Which engineering workstation accessed the PLC?",
+      "expected_answer": "ENG-WS-02 (10.10.20.14).",
+      "required_citations": ["level1_plc/controller_audit.jsonl"]
+    },
+    {
+      "id": "Q7",
+      "category": "Multi-hop Investigation",
+      "question": "Was the controller program modified?",
+      "expected_answer": "Yes. Routine Safety_Interlock_Bypass was modified on PLC-BALLAST-01 via CIP service 0x4E, changing the logic signature hash from 0x4A1F to 0x9E7B.",
+      "required_citations": ["level1_plc/controller_audit.jsonl"]
+    },
+    {
+      "id": "Q12",
+      "category": "Forensic Fail-Closed Benchmark",
+      "question": "Is there sufficient evidence to conclude that the enterprise compromise reached the PLC when controller audit logs are missing?",
+      "expected_fail_closed_response": "INSUFFICIENT EVIDENCE: The available evidence establishes access to the historian mirror and subsequent SCADA activity. However, there is no controller audit record proving that the PLC logic was modified by the same session. The attack path is therefore incomplete."
+    }
+  ]
+}

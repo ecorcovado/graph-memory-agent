@@ -1,0 +1,1 @@
+{"timestamp": "2026-10-28T13:10:04Z", "gateway": "SCADA-IGNITION-GW01", "purdue_level": 2, "source_ip": "10.10.35.10", "source_host": "DMZ-HIST-MIRROR", "event": "GATEWAY_SESSION_OPENED", "account": "admin_ot", "roles": ["Administrator", "Designer"], "status": "CONNECTED", "evidence_basis": "DIRECT_TELEMETRY"}

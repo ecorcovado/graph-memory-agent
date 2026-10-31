@@ -1,0 +1,66 @@
+{
+  "case_id": "AEGIS-OT-2026-001",
+  "title": "Project Aegis — Purdue Model IT-to-OT Intrusion Case Study",
+  "version": "1.0.0",
+  "release_date": "2026-10-31",
+  "facility_type": "Pilbara Iron Ore Processing Terminal & Port Facility (Western Australia)",
+  "compliance_frameworks": [
+    {
+      "name": "NIST SP 800-82 Rev. 3",
+      "focus": "OT/ICS Security Architecture, Network Segmentation, and Conduits"
+    },
+    {
+      "name": "MITRE ATT&CK for ICS v20.0",
+      "release_date": "2026-10-13",
+      "tactics_covered": [
+        "Initial Access",
+        "Execution",
+        "Persistence",
+        "Lateral Movement",
+        "Impair Process Control",
+        "Inhibit Response Function",
+        "Impact"
+      ]
+    },
+    {
+      "name": "ISA-95 / Purdue Enterprise Reference Architecture (PERA)",
+      "levels": [
+        "Level 4 (Enterprise)",
+        "Level 3.5 (Industrial DMZ)",
+        "Level 3 (Operations)",
+        "Level 2 (Supervisory Control)",
+        "Level 1 (Basic Control)",
+        "Level 0 (Physical Process)"
+      ]
+    }
+  ],
+  "evidence_sources": {
+    "enterprise": [
+      "enterprise/sysmon.jsonl",
+      "enterprise/windows_security.jsonl"
+    ],
+    "industrial_dmz": [
+      "industrial_dmz/firewall.jsonl",
+      "industrial_dmz/remote_access.jsonl",
+      "industrial_dmz/historian_mirror.jsonl"
+    ],
+    "level3_operations": [
+      "level3_operations/historian_audit.jsonl"
+    ],
+    "level2_scada": [
+      "level2_scada/scada_audit.jsonl",
+      "level2_scada/engineering_workstation.jsonl"
+    ],
+    "level1_plc": [
+      "level1_plc/controller_audit.jsonl"
+    ],
+    "level0_process": [
+      "level0_process/process_events.jsonl"
+    ]
+  },
+  "ground_truth": {
+    "expected_attack_path": "ground_truth/expected_attack_path.json",
+    "expected_facts": "ground_truth/expected_facts.json",
+    "expected_conclusions": "ground_truth/expected_conclusions.json"
+  }
+}

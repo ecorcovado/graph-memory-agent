@@ -3,6 +3,7 @@ CLI Runner for Graph Memory Agent
 Demonstrates multi-hop graph exploration using local Ollama (qwen2.5-coder:7b).
 """
 
+import os
 import sys
 import argparse
 from core.graph_builder import LocalOllamaClient, GraphBuilder
@@ -23,7 +24,7 @@ DEFAULT_QUESTION = "In which historic building was the lab founded where the lea
 def main():
     parser = argparse.ArgumentParser(description="Graph Memory Agent - Local Multi-Hop LLM Reasoning")
     parser.add_argument("--model", type=str, default="qwen2.5-coder:7b", help="Ollama model name (default: qwen2.5-coder:7b)")
-    parser.add_argument("--file", type=str, default=None, help="Path to custom text file or incident log to analyze")
+    parser.add_argument("--file", type=str, default=None, help="Path to custom text file or incident directory")
     parser.add_argument("--question", type=str, default=DEFAULT_QUESTION, help="Target multi-hop question")
     args = parser.parse_args()
 
@@ -35,9 +36,15 @@ def main():
     # Determine input text
     if args.file:
         try:
-            with open(args.file, "r", encoding="utf-8") as f:
+            target_path = args.file
+            if os.path.isdir(target_path):
+                overview_path = os.path.join(target_path, "incident_overview.txt")
+                if os.path.exists(overview_path):
+                    target_path = overview_path
+                    print(f"[*] Case directory provided. Loaded: {target_path}")
+            with open(target_path, "r", encoding="utf-8") as f:
                 target_text = f.read()
-            print(f"[*] Loaded custom document from: {args.file} ({len(target_text)} chars)")
+            print(f"[*] Loaded document from: {target_path} ({len(target_text)} chars)")
         except Exception as e:
             print(f"[!] Error reading file '{args.file}': {e}")
             sys.exit(1)

@@ -1,0 +1,94 @@
+{
+  "ground_truth_atomic_facts": [
+    {
+      "fact_id": "FACT_L4_01",
+      "text": "CORP-WS-019 executed powershell.exe with an encoded command",
+      "subject": "corp-ws-019",
+      "relation": "executed",
+      "object": "powershell.exe",
+      "classification": "OBSERVED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "source_file": "enterprise/sysmon.jsonl"
+    },
+    {
+      "fact_id": "FACT_L4_02",
+      "text": "CORP-WS-019 communicated with external command and control IP 203.0.113.88",
+      "subject": "corp-ws-019",
+      "relation": "communicated_with",
+      "object": "203.0.113.88",
+      "classification": "OBSERVED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "source_file": "enterprise/sysmon.jsonl"
+    },
+    {
+      "fact_id": "FACT_CTI_01",
+      "text": "Cyber threat intelligence attributes IP 203.0.113.88 to DEV-HEXANE",
+      "subject": "203.0.113.88",
+      "relation": "attributed_to",
+      "object": "dev-hexane",
+      "classification": "INTELLIGENCE_REPORTED",
+      "evidence_basis": "THREAT_INTELLIGENCE",
+      "source_file": "incident_overview.txt"
+    },
+    {
+      "fact_id": "FACT_DMZ_01",
+      "text": "CORP-WS-019 connected to DMZ-HIST-MIRROR through firewall PERA-DMZ-FW01",
+      "subject": "corp-ws-019",
+      "relation": "connected_to",
+      "object": "dmz-hist-mirror",
+      "classification": "OBSERVED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "source_file": "industrial_dmz/firewall.jsonl"
+    },
+    {
+      "fact_id": "FACT_L3_01",
+      "text": "DMZ-HIST-MIRROR connected to Level 3 operations server L3-HIST-SRV01",
+      "subject": "dmz-hist-mirror",
+      "relation": "connected_to",
+      "object": "l3-hist-srv01",
+      "classification": "OBSERVED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "source_file": "level3_operations/historian_audit.jsonl"
+    },
+    {
+      "fact_id": "FACT_L2_01",
+      "text": "DMZ-HIST-MIRROR authenticated to SCADA-IGNITION-GW01",
+      "subject": "dmz-hist-mirror",
+      "relation": "authenticated_to",
+      "object": "scada-ignition-gw01",
+      "classification": "OBSERVED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "source_file": "level2_scada/scada_audit.jsonl"
+    },
+    {
+      "fact_id": "FACT_L2_02",
+      "text": "SCADA-IGNITION-GW01 connected to engineering workstation ENG-WS-02",
+      "subject": "scada-ignition-gw01",
+      "relation": "connected_to",
+      "object": "eng-ws-02",
+      "classification": "OBSERVED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "source_file": "incident_overview.txt"
+    },
+    {
+      "fact_id": "FACT_L1_01",
+      "text": "ENG-WS-02 modified logic on PLC-BALLAST-01 via CIP program download",
+      "subject": "eng-ws-02",
+      "relation": "modified_logic",
+      "object": "plc-ballast-01",
+      "classification": "OBSERVED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "source_file": "level1_plc/controller_audit.jsonl"
+    },
+    {
+      "fact_id": "FACT_L0_01",
+      "text": "PLC-BALLAST-01 sent command suppressing safety shutdown on PT-4012",
+      "subject": "plc-ballast-01",
+      "relation": "sent_command",
+      "object": "pt-4012",
+      "classification": "OBSERVED",
+      "evidence_basis": "DIRECT_TELEMETRY",
+      "source_file": "level0_process/process_events.jsonl"
+    }
+  ]
+}

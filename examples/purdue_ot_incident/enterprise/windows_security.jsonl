@@ -1,0 +1,2 @@
+{"event_id": 4624, "timestamp": "2026-10-28T08:10:05Z", "host": "CORP-WS-019", "purdue_level": 4, "target_user_name": "j.miller", "target_domain_name": "CORP", "logon_type": 2, "workstation_name": "CORP-WS-019", "status": "0x0", "evidence_basis": "DIRECT_TELEMETRY"}
+{"event_id": 4672, "timestamp": "2026-10-28T08:10:05Z", "host": "CORP-WS-019", "purdue_level": 4, "subject_user_name": "j.miller", "privilege_list": ["SeSecurityPrivilege", "SeTakeOwnershipPrivilege"], "evidence_basis": "DIRECT_TELEMETRY"}
