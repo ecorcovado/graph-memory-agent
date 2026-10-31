@@ -470,6 +470,86 @@ class TestGraphMemoryAgent(unittest.TestCase):
         # Without fact citations proving PLC modification, verification fails closed or returns incomplete
         self.assertIn("INSUFFICIENT EVIDENCE", answer)
 
+    def test_untrusted_source_cannot_assert_direct_telemetry(self):
+        # Even if explicit basis is passed as DIRECT_TELEMETRY, untrusted source must fail closed to UNCLASSIFIED
+        tier, basis = classify_relation_forensics(
+            "executed",
+            source_type="UNKNOWN_IMPORT",
+            evidence_basis=EVIDENCE_BASIS_TELEMETRY,
+        )
+        self.assertEqual(tier, "UNCLASSIFIED")
+        self.assertEqual(basis, EVIDENCE_BASIS_UNCLASSIFIED)
+
+        # Incident report also cannot assert DIRECT_TELEMETRY
+        tier_rep, basis_rep = classify_relation_forensics(
+            "executed",
+            source_type="INCIDENT_REPORT",
+            evidence_basis=EVIDENCE_BASIS_TELEMETRY,
+        )
+        self.assertEqual(tier_rep, "UNCLASSIFIED")
+        self.assertEqual(basis_rep, EVIDENCE_BASIS_UNCLASSIFIED)
+
+    def test_missing_timestamp_defaults_to_unknown(self):
+        # If timestamp is missing, it must be explicit UNKNOWN, never defaulting to ingestion time
+        events = StructuredLogParser.parse_line(
+            data={"event_id": 1, "host": "CORP-WS-019", "process": "powershell.exe"},
+            source_id="test_src",
+            source_type="SYSMON_EVENT",
+            file_rel="sysmon.jsonl",
+            line_idx=1,
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_time, "UNKNOWN")
+
+    def test_rich_forensic_attributes_and_raw_vault_preserved(self):
+        import os
+
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        # 1. Sysmon user attribute must be preserved in AtomicFact
+        sysmon_facts = [f for f in kg.atomic_facts.values() if f.source_type == "SYSMON_EVENT" and f.relation == "executed"]
+        self.assertTrue(len(sysmon_facts) > 0)
+        first_sysmon = sysmon_facts[0]
+        self.assertEqual(first_sysmon.attributes.get("user"), "corp\\j.miller")
+        self.assertIn("user: corp\\j.miller", first_sysmon.text)
+
+        # 2. Controller audit CIP hash signatures must be preserved
+        cip_facts = [f for f in kg.atomic_facts.values() if f.source_type == "CONTROLLER_AUDIT"]
+        self.assertTrue(len(cip_facts) > 0)
+        first_cip = cip_facts[0]
+        self.assertEqual(first_cip.attributes.get("prior_signature"), "0x4A1F")
+        self.assertEqual(first_cip.attributes.get("new_signature"), "0x9E7B")
+        self.assertIn("prior_signature: 0x4A1F", first_cip.text)
+        self.assertIn("new_signature: 0x9E7B", first_cip.text)
+
+        # 3. Raw record vault must store the original dictionary
+        vault_key = (first_cip.source_id, first_cip.source_record_id)
+        self.assertIn(vault_key, kg.raw_record_vault)
+        raw_cip = kg.raw_record_vault[vault_key]
+        self.assertEqual(raw_cip.get("model"), "Rockwell ControlLogix 1756-L83E")
+
+    def test_ingestion_completeness_report_metrics(self):
+        import os
+
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+
+        # Complete ingestion
+        kg_full = loader.load_case()
+        self.assertIsNotNone(kg_full.ingestion_report)
+        self.assertTrue(kg_full.ingestion_report.is_complete)
+        self.assertEqual(len(kg_full.ingestion_report.missing_sources), 0)
+        self.assertGreater(kg_full.ingestion_report.facts_produced, 0)
+
+        # Incomplete ingestion (missing controller audit)
+        kg_partial = loader.load_case(exclude_sources=["controller_audit.jsonl"])
+        self.assertFalse(kg_partial.ingestion_report.is_complete)
+        self.assertIn("level1_plc/controller_audit.jsonl", kg_partial.ingestion_report.missing_sources)
+
 
 if __name__ == "__main__":
     unittest.main()

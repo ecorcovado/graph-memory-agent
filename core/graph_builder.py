@@ -9,7 +9,7 @@ import json
 import re
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import networkx as nx
 from core.budget_manager import PromptBudgetManager
 
@@ -82,13 +82,24 @@ def classify_relation_forensics(
 ) -> Tuple[str, str]:
     """
     Separates predicate semantics (what happened) from evidence basis (how it is known).
-    Strictly validates both source_type and explicit evidence_basis.
-    Unknown or unverified source types strictly fail closed to UNCLASSIFIED.
-    Returns (classification_tier, evidence_basis).
+    Enforces strict source trust validation BEFORE honoring explicit evidence bases:
+    - Untrusted source types strictly fail closed to UNCLASSIFIED and CANNOT assert DIRECT_TELEMETRY.
+    - Explicit evidence basis cannot elevate beyond the verified capabilities of its source_type.
     """
     tier = classify_relation(relation)
 
-    # 1. Validate explicit evidence basis if provided
+    # 1. Strict Source-Type Validation First (Source Trust Firewall)
+    if source_type not in TRUSTED_TELEMETRY_SOURCES and source_type not in {
+        "INCIDENT_REPORT", "THREAT_INTELLIGENCE", "INFERRED", "CO_OCCURRENCE"
+    }:
+        # Untrusted source: strictly fail closed to UNCLASSIFIED
+        return "UNCLASSIFIED", EVIDENCE_BASIS_UNCLASSIFIED
+
+    # 2. Prevent untrusted sources from self-asserting DIRECT_TELEMETRY
+    if evidence_basis == EVIDENCE_BASIS_TELEMETRY and source_type not in TRUSTED_TELEMETRY_SOURCES:
+        return "UNCLASSIFIED", EVIDENCE_BASIS_UNCLASSIFIED
+
+    # 3. Validate explicit evidence basis if provided
     if evidence_basis:
         if evidence_basis in VALID_EVIDENCE_BASES:
             basis = evidence_basis
@@ -108,7 +119,6 @@ def classify_relation_forensics(
     elif source_type == "INFERRED":
         basis = EVIDENCE_BASIS_INFERRED
     else:
-        # Strict fail-closed: Unknown source types (e.g. UNKNOWN_IMPORT) strictly default to UNCLASSIFIED
         basis = EVIDENCE_BASIS_UNCLASSIFIED
         tier = "UNCLASSIFIED"
 
@@ -160,6 +170,7 @@ class AtomicFact:
     source_record_id: str = ""
     source_location: str = ""
     event_time: str = ""
+    purdue_level: Optional[float] = None
     subject: str = ""
     relation: str = "related_to"
     object_entity: str = ""
@@ -167,6 +178,8 @@ class AtomicFact:
     evidence_basis: str = "UNCLASSIFIED"
     source_type: str = "INCIDENT_REPORT"
     confidence: str = "HIGH"
+    attributes: Dict[str, Any] = field(default_factory=dict)
+    raw_record: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -178,6 +191,9 @@ class KnowledgeGraph:
     node_to_facts: Dict[str, List[str]] = field(default_factory=dict)
     # Map source_id -> full SHA-256 digest for document verification
     source_hashes: Dict[str, str] = field(default_factory=dict)
+    # Source Record Vault: (source_id, record_id) -> original raw dictionary
+    raw_record_vault: Dict[Tuple[str, str], dict] = field(default_factory=dict)
+    ingestion_report: Optional[Any] = None
 
     def get_neighbors_with_relations(self, node: str) -> List[ForensicRelation]:
         """
