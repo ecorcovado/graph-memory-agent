@@ -19,6 +19,16 @@ def normalize_entity(name: str) -> str:
     return cleaned
 
 
+def classify_relation(relation: str) -> str:
+    """Classifies edge relations into forensic tiers: OBSERVED, INTELLIGENCE_REPORTED, or CO_OCCURRENCE."""
+    rel = relation.lower().strip()
+    if rel in ["co_occurs_with", "co_occurs", "related_to"]:
+        return "CO_OCCURRENCE"
+    if any(k in rel for k in ["attributed", "intel", "known", "associated", "suspected", "reported"]):
+        return "INTELLIGENCE_REPORTED"
+    return "OBSERVED"
+
+
 @dataclass
 class AtomicFact:
     fact_id: str
@@ -38,10 +48,10 @@ class KnowledgeGraph:
     # Map key element (normalized) -> list of fact_ids
     node_to_facts: Dict[str, List[str]] = field(default_factory=dict)
 
-    def get_neighbors_with_relations(self, node: str) -> List[Tuple[str, str, str]]:
+    def get_neighbors_with_relations(self, node: str) -> List[Tuple[str, str, str, str]]:
         """
-        Returns list of (direction, relation, connected_node) for the given node.
-        Allows the agent to understand relationship direction (e.g. host -> executes -> process).
+        Returns list of (direction, relation, classification, connected_node).
+        Distinguishes OBSERVED events from INTELLIGENCE_REPORTED or CO_OCCURRENCE.
         """
         results = []
         if not self.graph.has_node(node):
@@ -50,12 +60,14 @@ class KnowledgeGraph:
         # Outgoing edges: node -> target
         for _, target, data in self.graph.out_edges(node, data=True):
             rel = data.get("relation", "connected_to")
-            results.append(("outgoing", rel, target))
+            cls = data.get("classification", "OBSERVED")
+            results.append(("outgoing", rel, cls, target))
 
         # Incoming edges: source -> node
         for source, _, data in self.graph.in_edges(node, data=True):
             rel = data.get("relation", "connected_to")
-            results.append(("incoming", rel, source))
+            cls = data.get("classification", "OBSERVED")
+            results.append(("incoming", rel, cls, source))
 
         return results
 
@@ -244,22 +256,28 @@ class GraphBuilder:
                 if not kg.graph.has_node(elem):
                     kg.graph.add_node(elem, label=elem)
 
-        # Create directed edges with typed relationships
+        # Create directed edges with typed relationships and classifications
         for fact in all_facts:
             u = fact.subject
             v = fact.object_entity
             rel = fact.relation
 
             if u and v and u != v:
-                kg.graph.add_edge(u, v, relation=rel, fact_id=fact.fact_id)
+                cls = classify_relation(rel)
+                kg.graph.add_edge(u, v, relation=rel, classification=cls, fact_id=fact.fact_id)
 
-            # Fallback co-occurrence edges between secondary key elements
+            # Secondary entity co-occurrence edges (explicitly tagged CO_OCCURRENCE)
             elems = [e for e in fact.key_elements if e]
             for i in range(len(elems)):
                 for j in range(i + 1, len(elems)):
                     e1, e2 = elems[i], elems[j]
                     if e1 != e2 and not kg.graph.has_edge(e1, e2):
-                        kg.graph.add_edge(e1, e2, relation="co_occurs_with", fact_id=fact.fact_id)
+                        kg.graph.add_edge(
+                            e1, e2,
+                            relation="co_occurs_with",
+                            classification="CO_OCCURRENCE",
+                            fact_id=fact.fact_id,
+                        )
 
         print(f"[+] Directed Knowledge Graph built: {kg.graph.number_of_nodes()} nodes, {kg.graph.number_of_edges()} edges, {len(kg.atomic_facts)} atomic facts.")
         return kg

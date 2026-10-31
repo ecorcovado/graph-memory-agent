@@ -54,11 +54,12 @@ This project runs **100% locally** via Ollama. It extracts a directed `MultiDiGr
 
 ## Key Technical Guardrails
 
-* **Directed MultiDiGraph:** Distinguishes relationship directions (`Process -> executed -> Command` vs reverse) and supports multiple typed edges with fact provenance IDs.
-* **Bounded Notebook Memory:** Enforces a strict token budget with deduplication and FIFO eviction of oldest notes so prompts never exceed the 4K context window.
+* **Directed MultiDiGraph with Forensic Tiers:** Distinguishes relationship directions (`Host -> communicated_with -> IP` vs reverse) and tags edges with forensic classifications: `OBSERVED` (endpoint events), `INTELLIGENCE_REPORTED` (threat intelligence attribution), or `CO_OCCURRENCE`.
+* **Centralized Prompt Budget Manager:** Strictly allocates context budgets (system instructions: 400t, query/plan: 300t, notebook: 1,000t, context: 1,500t, output reserve: 500t) and clamps candidate node lists to guarantee requests never exceed 4,096 tokens.
+* **Bounded Provenance Memory (`EvidenceNote`):** Enforces a 1,000-token budget with per-note clamping, deduplication, and FIFO eviction. Each note preserves immutable `fact_ids` and source excerpts.
 * **Explicit Context Limit:** Passes `"options": {"num_ctx": 4096}` directly to the Ollama API.
-* **Resilient Node Selection:** Avoids blind fallbacks; uses query keyword overlap and hub-degree centrality.
-* **Evidence Verification:** Requires an unbroken evidence chain before synthesizing a final answer, preventing unsupported hallucinations.
+* **Resilient Node Selection & Action Validation:** Avoids blind fallbacks using query keyword overlap and hub-degree centrality. Rejects invalid hop targets before execution.
+* **Deterministic Evidence Verification:** Requires an unbroken evidence chain citing verified `fact_ids` before synthesizing a final answer, preventing unsupported hallucinations.
 
 ---
 
@@ -143,13 +144,14 @@ The persistence scheduled task associated with the threat group communicating wi
 ```
 graph-memory-agent/
 ├── core/
-│   ├── graph_builder.py   # Ollama client, fact extractor, and NetworkX MultiDiGraph
-│   ├── notebook.py        # Bounded scratchpad memory with token budgeting
+│   ├── budget_manager.py  # Central prompt budget manager (enforces 4K token ceiling)
+│   ├── graph_builder.py   # Ollama client, triple extractor, and NetworkX MultiDiGraph
+│   ├── notebook.py        # Bounded provenance memory with EvidenceNotes & FIFO eviction
 │   └── agent.py           # Rational planner, node explorer, and evidence verifier
 ├── examples/
 │   └── cyber_incident_report.txt # DFIR incident triage scenario
 ├── tests/
-│   └── test_components.py # 6 offline unit tests (token limits, graph direction, fallbacks)
+│   └── test_components.py # 8 offline unit tests (budgeting, graph direction, fallbacks)
 ├── run_agent.py           # CLI entry point
 └── README.md
 ```
