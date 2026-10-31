@@ -20,6 +20,8 @@ class InvestigationRequirements:
     required_source_types: Set[str] = field(default_factory=set)
     required_predicates: Set[str] = field(default_factory=set)
     target_claim: str = ""
+    expected_controller: Optional[str] = None
+    expected_actuator: Optional[str] = None
 
 
 def extract_json_objects(text: str) -> List[dict]:
@@ -334,20 +336,30 @@ class GraphReaderAgent:
             req_sources = set()
             req_preds = set()
             claims = []
+            exp_ctrl = None
+            exp_act = None
+
             if "plc" in q_lower and any(w in q_lower for w in ["modif", "compromis", "reach", "logic", "attack", "controller"]):
                 req_sources.add("CONTROLLER_AUDIT")
                 req_preds.add("modified_logic")
                 claims.append("PLC logic modification")
+                ctrl_match = re.search(r"plc-[\w-]+", q_lower)
+                exp_ctrl = ctrl_match.group(0) if ctrl_match else "plc-ballast-01"
+
             if any(w in q_lower for w in ["pressure", "valve", "dump", "interlock", "safety", "bypass"]):
                 req_sources.add("PROCESS_TELEMETRY")
                 req_preds.add("interlock_status")
                 claims.append("Physical process interlock telemetry")
+                act_match = re.search(r"[a-z]{2}-\d{4}", q_lower)
+                exp_act = act_match.group(0) if act_match else "xv-4012"
 
             if req_sources:
                 requirements = InvestigationRequirements(
                     required_source_types=req_sources,
                     required_predicates=req_preds,
                     target_claim=" and ".join(claims),
+                    expected_controller=exp_ctrl,
+                    expected_actuator=exp_act,
                 )
 
         if requirements and hasattr(self.kg, "ingestion_report") and self.kg.ingestion_report:
@@ -372,17 +384,29 @@ class GraphReaderAgent:
             return "INSUFFICIENT EVIDENCE: No relevant clues were gathered during graph traversal."
 
         verified_fact_ids = self.notebook.get_all_fact_ids()
+        notebook_facts = [self.kg.atomic_facts.get(fid) for fid in verified_fact_ids if fid in self.kg.atomic_facts]
 
-        # Enforce required predicate presence in gathered notebook
-        if requirements and requirements.required_predicates:
-            notebook_facts = [self.kg.atomic_facts.get(fid) for fid in verified_fact_ids if fid in self.kg.atomic_facts]
-            has_pred = any(f.relation in requirements.required_predicates for f in notebook_facts if f)
-            if not has_pred:
-                self._log("EVIDENCE POLICY ENFORCED", f"Missing required predicate: {requirements.required_predicates}")
-                return (
-                    f"INSUFFICIENT EVIDENCE: Gathered evidence lacks required predicate(s) "
-                    f"{sorted(list(requirements.required_predicates))} to prove {requirements.target_claim}."
-                )
+        # Enforce that ALL required predicates and sources are substantiated in gathered notebook
+        if requirements:
+            if requirements.required_predicates:
+                present_predicates = {f.relation for f in notebook_facts if f}
+                missing_predicates = requirements.required_predicates - present_predicates
+                if missing_predicates:
+                    self._log("EVIDENCE POLICY ENFORCED", f"Missing required predicate(s): {missing_predicates}")
+                    return (
+                        f"INSUFFICIENT EVIDENCE: Gathered evidence lacks required predicate(s) "
+                        f"{sorted(list(missing_predicates))} to prove {requirements.target_claim}."
+                    )
+
+            if requirements.required_source_types:
+                present_sources = {f.source_type for f in notebook_facts if f}
+                missing_sources = requirements.required_source_types - present_sources
+                if missing_sources:
+                    self._log("DEGRADED EVIDENCE POLICY ENFORCED", f"Missing evidence from required sources: {missing_sources}")
+                    return (
+                        f"INSUFFICIENT EVIDENCE: Investigation incomplete. Gathered notebook evidence lacks "
+                        f"telemetry from required source type(s) {sorted(list(missing_sources))}."
+                    )
 
         notes = self.notebook.format_for_prompt()
 
@@ -456,6 +480,8 @@ class GraphReaderAgent:
 
         # 4. Claim-Level Predicate and Entity Validation:
         all_cited_facts = [self.kg.atomic_facts.get(fid) for fid in cited_fact_ids if fid in self.kg.atomic_facts]
+        expected_target_ctrl = requirements.expected_controller if (requirements and requirements.expected_controller) else "plc-ballast-01"
+        expected_target_act = requirements.expected_actuator if (requirements and requirements.expected_actuator) else "xv-4012"
 
         # A. Validate Structured Claims if present
         if structured_claims:
@@ -465,14 +491,16 @@ class GraphReaderAgent:
                 claim_facts = [self.kg.atomic_facts.get(fid) for fid in c_fids if fid in self.kg.atomic_facts]
                 if ("plc" in stmt or "logic" in stmt or "controller" in stmt) and "modif" in stmt:
                     has_exact_target = any(
-                        f.relation == "modified_logic" and "plc" in f.object_entity.lower()
+                        f.relation == "modified_logic"
+                        and f.source_type == "CONTROLLER_AUDIT"
+                        and f.object_entity == expected_target_ctrl
                         for f in claim_facts if f
                     )
                     if not has_exact_target:
-                        self._log("CLAIM VALIDATION FAILED", f"Claim '{stmt}' not supported by predicate 'modified_logic' on target controller.")
+                        self._log("CLAIM VALIDATION FAILED", f"Structured claim '{stmt}' does not verify predicate 'modified_logic' from CONTROLLER_AUDIT on expected target controller '{expected_target_ctrl}'.")
                         return (
                             f"INSUFFICIENT EVIDENCE: Claim '{claim.get('statement')}' cites facts that do not "
-                            f"establish required predicate 'modified_logic' on the specified controller."
+                            f"verify required predicate 'modified_logic' from CONTROLLER_AUDIT on expected target controller '{expected_target_ctrl}'."
                         )
 
         # B. Plaintext Claim Validation (prevents verification bypass on unstructured text)
@@ -480,40 +508,54 @@ class GraphReaderAgent:
         if "insufficient evidence" not in ans_lower:
             # If answer asserts PLC modification or download
             if ("plc" in ans_lower or "controller" in ans_lower) and any(w in ans_lower for w in ["modif", "download", "logic"]):
-                ctrl_match = re.search(r"plc-[\w-]+", ans_lower) or re.search(r"plc-[\w-]+", q_lower)
-                target_ctrl = ctrl_match.group(0) if ctrl_match else "plc-ballast-01"
+                # Expected target controller is strictly bound to requirements/question, not what the answer claims!
+                claimed_ctrls = set(re.findall(r"plc-[\w-]+", ans_lower))
+                if claimed_ctrls and expected_target_ctrl not in claimed_ctrls:
+                    self._log("CLAIM VALIDATION FAILED", f"Answer claims modification on '{claimed_ctrls}', which does not substantiate expected target '{expected_target_ctrl}'.")
+                    return (
+                        f"INSUFFICIENT EVIDENCE: Generated answer claims modification on non-target controller(s) "
+                        f"{sorted(list(claimed_ctrls))}, which does not substantiate expected target '{expected_target_ctrl}'."
+                    )
+
                 valid_plc_facts = [
                     f for f in all_cited_facts
                     if f and f.relation == "modified_logic"
                     and f.source_type == "CONTROLLER_AUDIT"
-                    and f.object_entity == target_ctrl
+                    and f.object_entity == expected_target_ctrl
                 ]
                 if not valid_plc_facts:
-                    self._log("CLAIM VALIDATION FAILED", f"Assertion of PLC logic modification lacks verified fact with predicate 'modified_logic' on target controller '{target_ctrl}'.")
+                    self._log("CLAIM VALIDATION FAILED", f"Assertion of PLC logic modification lacks verified fact with predicate 'modified_logic' on expected target controller '{expected_target_ctrl}'.")
                     return (
                         f"INSUFFICIENT EVIDENCE: Generated answer asserts PLC logic modification, but cited facts "
-                        f"do not verify predicate 'modified_logic' from CONTROLLER_AUDIT on target controller '{target_ctrl}'."
+                        f"do not verify predicate 'modified_logic' from CONTROLLER_AUDIT on expected target controller '{expected_target_ctrl}'."
                     )
 
             # If answer asserts safety interlock suppression / bypass
             if "interlock" in ans_lower and any(w in ans_lower for w in ["bypass", "suppress", "inhibit", "override", "disarm"]):
-                target_tag = "xv-4012" if "xv-4012" in ans_lower or "xv-4012" in q_lower else None
+                claimed_tags = set(re.findall(r"[a-z]{2}-\d{4}", ans_lower))
+                if claimed_tags and expected_target_act not in claimed_tags:
+                    self._log("CLAIM VALIDATION FAILED", f"Answer claims bypass on '{claimed_tags}', which does not substantiate expected actuator '{expected_target_act}'.")
+                    return (
+                        f"INSUFFICIENT EVIDENCE: Generated answer claims bypass on non-target tag(s) "
+                        f"{sorted(list(claimed_tags))}, which does not substantiate expected target '{expected_target_act}'."
+                    )
+
                 valid_interlock_facts = []
                 for f in all_cited_facts:
                     if not f:
                         continue
                     if f.source_type == "PROCESS_TELEMETRY" and f.relation == "interlock_status":
-                        tag_match = (f.subject == target_tag or target_tag in f.subject) if target_tag else True
+                        tag_match = (f.subject == expected_target_act or expected_target_act in f.subject)
                         status_val = str(f.object_entity or f.attributes.get("interlock_status", "")).lower()
                         is_bypassed = any(term in status_val for term in ["suppress", "bypass", "inhibit", "override", "disarm", "false", "0"])
                         if tag_match and is_bypassed:
                             valid_interlock_facts.append(f)
 
                 if not valid_interlock_facts:
-                    self._log("CLAIM VALIDATION FAILED", f"Assertion of safety interlock bypass lacks cited fact verifying suppressed interlock on target tag '{target_tag or 'safety valve'}'.")
+                    self._log("CLAIM VALIDATION FAILED", f"Assertion of safety interlock bypass lacks cited fact verifying suppressed interlock on target tag '{expected_target_act}'.")
                     return (
                         f"INSUFFICIENT EVIDENCE: Generated answer asserts safety interlock bypass, but cited facts "
-                        f"do not verify suppressed/bypassed interlock telemetry on target tag '{target_tag or 'safety valve'}'."
+                        f"do not verify suppressed/bypassed interlock telemetry on target tag '{expected_target_act}'."
                     )
 
         self._log("EVIDENCE VERIFIED", f"All cited Fact IDs verified against notebook: {cited_fact_ids}")

@@ -1,0 +1,9 @@
+#separator \x09
+#set_separator	,
+#empty_field	(empty)
+#unset_field	-
+#path	conn
+#fields	ts	uid	id.orig_h	id.orig_p	id.resp_h	id.resp_p	proto	service	duration	orig_bytes	resp_bytes	conn_state	local_orig	local_resp	missed_bytes	history	orig_pkts	orig_ip_bytes	resp_pkts	resp_ip_bytes	tunnel_parents
+#types	time	string	addr	port	addr	port	enum	string	interval	count	count	string	bool	bool	count	string	count	count	count	count	set[string]
+1730112310.125432	C_DMZ_001	10.10.4.19	49152	10.10.30.15	8088	tcp	http	0.045120	1200	4500	SF	T	T	0	ShADadFf	12	1800	14	5200	-
+1730112315.987654	C_DMZ_002	10.10.4.19	49153	10.10.30.22	44818	tcp	enip	-	-	-	S0	T	T	0	S	1	60	0	0	-

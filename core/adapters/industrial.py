@@ -408,6 +408,12 @@ class ProcessTelemetryAdapter(BaseLogAdapter):
                 )
                 if "PLC" in str(interlock).upper():
                     # Physical control link connecting Level 1 controller to Level 0 actuator
+                    ctrl_id = normalize_entity(
+                        record.get("controller")
+                        or record.get("controller_id")
+                        or record.get("associated_controller")
+                        or "plc-ballast-01"
+                    )
                     events.append(
                         NormalizedEvent(
                             source_id=source_id,
@@ -416,7 +422,7 @@ class ProcessTelemetryAdapter(BaseLogAdapter):
                             event_time=event_time,
                             ingested_at=ingested_at,
                             event_type="CONTROLLER_ACTUATOR_LINK",
-                            subject="plc-ballast-01",
+                            subject=ctrl_id,
                             predicate="sent_command",
                             object_entity=tag,
                             raw_record=raw,

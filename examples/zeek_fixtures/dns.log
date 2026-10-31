@@ -1,0 +1,8 @@
+#separator \x09
+#set_separator	,
+#empty_field	(empty)
+#unset_field	-
+#path	dns
+#fields	ts	uid	id.orig_h	id.orig_p	id.resp_h	id.resp_p	proto	trans_id	rtt	query	qclass	qclass_name	qtype	qtype_name	rcode	rcode_name	AA	TC	RD	RA	Z	answers	TTLs	rejected
+#types	time	string	addr	port	addr	port	enum	count	interval	string	count	string	count	string	count	string	bool	bool	bool	bool	count	vector[string]	vector[interval]	bool
+1730112308.543210	D_DNS_001	10.10.4.19	53535	10.10.30.1	53	udp	41029	0.001250	historian.pilbara.internal	1	C_INTERNET	1	A	0	NOERROR	F	F	T	T	0	10.10.30.15,10.10.30.16	60.0,60.0	F

@@ -220,8 +220,8 @@ graph-memory-agent/
 │       ├── level0_process/        # Level 0 Sensor telemetry & safety valve trip events
 │       └── ground_truth/          # Benchmark expected paths, atomic facts, and fail-closed answers
 ├── tests/
-│   └── test_components.py # 55 offline unit tests (adapters, fail-closed auditing, benchmark, reports)
-├── benchmark.py           # 4-way comparative evaluation suite (Keyword vs Vector RAG vs Graph vs Ours)
+│   └── test_components.py # 59 offline unit tests (adapters, fail-closed auditing, benchmark, reports)
+├── benchmark.py           # 4-way comparative evaluation suite (Keyword vs TF-IDF Top-k vs Graph vs Ours)
 ├── run_agent.py           # CLI entry point (supports --file, --case, and --report)
 └── README.md
 ```
@@ -244,6 +244,7 @@ graph-memory-agent/
 * [x] **v0.5.0 Investigation Workspace & Benchmark:** Executive terminal dashboard, standalone interactive HTML incident reports, and 4-way comparative evaluation benchmark
 * [x] **v0.5.1 Forensic Evaluation & Modular Architecture:** 9-stage modular adapter architecture (`core/adapters/` with `SysmonAdapter`, `ZeekAdapter`), string-aware JSON scanner, plaintext claim validation, HTML XSS protection, and conduit continuity verification
 * [x] **v0.5.2 Autonomous Agent Benchmark & Zeek TSV Ingestion:** Autonomous `agent.run()` benchmark execution, native Zeek TSV log parsing with `#fields` / `#types` headers and Unix epoch float timestamp normalization, exact target claim validation (`plc-ballast-01` & valve `xv-4012`), additive investigation requirements, consecutive prefix conduit continuity, and 55 passing unit tests
+* [x] **v0.5.3 Immutable Target Binding & Empirical Benchmark Metrics:** Strict immutable target binding (preventing answer claims from overriding expected target controller/actuator), all-predicate enforcement (`all()` set difference logic), dedicated Zeek TSV fixtures (`conn.log`, `dns.log`, `notice.log`) with `#separator`, `#types`, and escaped value handling, dynamic benchmark metric calculations, and 59 passing offline unit tests
 * [ ] **Automated ATT&CK Mapping:** Direct lookup mapping of observed edges to MITRE ATT&CK for ICS v20.0 technique IDs.
 
 ---

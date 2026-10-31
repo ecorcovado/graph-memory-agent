@@ -334,17 +334,40 @@ class CaseLoader:
                 is_zeek_tsv = any(l.startswith("#fields") or l.startswith("#separator") for l in raw_lines[:20])
 
                 if is_zeek_tsv:
+                    separator = "\t"
                     tsv_fields: List[str] = []
+                    tsv_types: List[str] = []
+                    unset_field = "-"
+                    empty_field = "(empty)"
+
                     for l in raw_lines:
-                        if l.startswith("#fields"):
-                            tsv_fields = ZeekAdapter.parse_tsv_headers(l)
-                            break
+                        if l.startswith("#separator"):
+                            separator = ZeekAdapter.parse_tsv_separator(l)
+                        elif l.startswith("#empty_field"):
+                            parts = l.split(maxsplit=1)
+                            if len(parts) > 1:
+                                empty_field = parts[1].strip()
+                        elif l.startswith("#unset_field"):
+                            parts = l.split(maxsplit=1)
+                            if len(parts) > 1:
+                                unset_field = parts[1].strip()
+                        elif l.startswith("#fields"):
+                            tsv_fields = ZeekAdapter.parse_tsv_headers(l, separator=separator)
+                        elif l.startswith("#types"):
+                            tsv_types = ZeekAdapter.parse_tsv_types(l, separator=separator)
 
                     for line_idx, line_str in enumerate(raw_lines, 1):
                         if line_str.startswith("#"):
                             continue
                         source_records_read += 1
-                        record = ZeekAdapter.parse_tsv_line(tsv_fields, line_str)
+                        record = ZeekAdapter.parse_tsv_line(
+                            fields=tsv_fields,
+                            line_str=line_str,
+                            types=tsv_types,
+                            separator=separator,
+                            unset_field=unset_field,
+                            empty_field=empty_field,
+                        )
                         stype = manifest_type if manifest_type != "UNCLASSIFIED" else "ZEEK_FLOW"
                         events = StructuredLogParser.parse_line(
                             data=record,

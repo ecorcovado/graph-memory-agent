@@ -15,6 +15,7 @@ import sys
 import time
 import math
 import json
+import re
 from collections import Counter
 from typing import Dict, Any, List, Tuple, Optional
 from core.case_loader import CaseLoader
@@ -97,7 +98,7 @@ def benchmark_keyword_search(case_dir: str, ground_truth: Optional[List[Tuple[st
 
 
 def benchmark_vector_rag(case_dir: str, ground_truth: Optional[List[Tuple[str, str, str]]] = None, top_k: int = 4) -> Dict[str, Any]:
-    """2. Vector RAG Simulation: TF-IDF vector retrieval ranking top-k chunks."""
+    """2. TF-IDF Top-k Retrieval Simulation: Frequency-based retrieval ranking top-k chunks."""
     if ground_truth is None:
         ground_truth = load_ground_truth_transitions(case_dir)
     start_t = time.perf_counter()
@@ -108,11 +109,11 @@ def benchmark_vector_rag(case_dir: str, ground_truth: Optional[List[Tuple[str, s
         if "ground_truth" in root:
             continue
         for f in files:
-            if f.endswith(".jsonl"):
+            if f.endswith(".jsonl") or f.endswith(".log"):
                 with open(os.path.join(root, f), "r", encoding="utf-8", errors="ignore") as fh:
                     for line in fh:
                         line_str = line.strip()
-                        if line_str:
+                        if line_str and not line_str.startswith("#"):
                             chunks.append(line_str.lower())
 
     # Compute TF-IDF Cosine Similarity against TARGET_QUESTION
@@ -143,14 +144,19 @@ def benchmark_vector_rag(case_dir: str, ground_truth: Optional[List[Tuple[str, s
     elapsed = (time.perf_counter() - start_t) * 1000
     continuity_pct = calculate_consecutive_continuity(found_flags)
 
+    # Dynamic metrics calculated directly from chunk contents and ground truth evaluation
+    tokens_consumed = sum(max(1, len(ch) // 4) for ch in top_chunks)
+    missing_edges = len(ground_truth) - sum(found_flags)
+    unverified_pct = round((missing_edges / len(ground_truth)) * 100, 1) if ground_truth else 0.0
+
     return {
-        "method": "Vector RAG (TF-IDF Top-k)",
+        "method": "TF-IDF Top-k Retrieval",
         "path_continuity": f"{continuity_pct}% (Broken at DMZ - {sum(found_flags)}/{len(ground_truth)} edges)",
         "continuity_pct": continuity_pct,
-        "provenance_accuracy": "15.0%",
-        "hallucination_rate": "50.0% (Infers false direct jump)",
+        "provenance_accuracy": "0.0% (No Cryptographic Verification)",
+        "hallucination_rate": f"{unverified_pct}% (Missing Intermediate Conduits)",
         "missing_evidence_detection": "NO",
-        "tokens_consumed": 1820,
+        "tokens_consumed": tokens_consumed,
         "latency_ms": round(elapsed, 2),
         "verdict": "FAIL: Lacks intermediate DMZ/SCADA bridge records.",
     }
@@ -176,14 +182,20 @@ def benchmark_graph_only(case_dir: str, ground_truth: Optional[List[Tuple[str, s
     elapsed = (time.perf_counter() - start_t) * 1000
     continuity_pct = calculate_consecutive_continuity(found_flags)
 
+    # Dynamic token estimation from graph edge attributes
+    edge_texts = [attr.get("text", "") for u, v, k, attr in kg.graph.edges(keys=True, data=True)]
+    tokens_consumed = sum(max(1, len(t) // 4) for t in edge_texts) if edge_texts else len(kg.graph.nodes) * 25
+    missing_edges = len(ground_truth) - sum(found_flags)
+    unverified_pct = round((missing_edges / len(ground_truth)) * 100, 1) if ground_truth else 0.0
+
     return {
         "method": "Unconstrained Graph (NetworkX)",
         "path_continuity": f"{continuity_pct}% ({sum(found_flags)}/{len(ground_truth)} edges)",
         "continuity_pct": continuity_pct,
-        "provenance_accuracy": "40.0% (No Hash Audit)",
-        "hallucination_rate": "25.0% (Unclassified edges allowed)",
+        "provenance_accuracy": "0.0% (Topology Only, No Hash Audit)",
+        "hallucination_rate": "0.0% (Graph Topology Validated)" if missing_edges == 0 else f"{unverified_pct}% (Unverified Conduits)",
         "missing_evidence_detection": "NO (No policy enforcement)",
-        "tokens_consumed": 1150,
+        "tokens_consumed": tokens_consumed,
         "latency_ms": round(elapsed, 2),
         "verdict": "PARTIAL: Traverses topology but lacks fail-closed claim audit.",
     }
@@ -319,7 +331,19 @@ def benchmark_graph_memory_agent(case_dir: str, ground_truth: Optional[List[Tupl
         found_flags.append(matched)
 
     continuity_pct = calculate_consecutive_continuity(found_flags)
-    provenance_accuracy = 100.0 if "INSUFFICIENT EVIDENCE" not in answer_complete else 0.0
+
+    # Dynamic provenance calculation: percentage of notebook facts backed by cryptographic source SHA-256 digests
+    valid_hashes = sum(
+        1 for fid in verified_fids
+        if fid in kg_complete.atomic_facts and kg_complete.atomic_facts[fid].source_id in kg_complete.source_hashes
+    )
+    prov_pct = round((valid_hashes / len(verified_fids)) * 100, 1) if verified_fids else 0.0
+    provenance_accuracy_str = f"{prov_pct}% (Cryptographic Hashes)" if prov_pct == 100.0 else f"{prov_pct}%"
+
+    # Dynamic citation audit: verify zero unverified or fabricated citations in generated answer
+    candidate_citations = set(re.findall(r"\b[a-f0-9]{8,64}_R\d+_[A-Za-z0-9_]+\b", answer_complete))
+    unverified_citations = candidate_citations - verified_fids
+    hallucination_str = "0.0% (Strict Allowlist Enforcement)" if not unverified_citations else f"{len(unverified_citations)} Fabricated Citations"
 
     # 2. Degraded Case (Autonomous agent.run() with missing controller audit)
     kg_degraded = loader.load_case(exclude_sources=["controller_audit.jsonl"])
@@ -331,16 +355,14 @@ def benchmark_graph_memory_agent(case_dir: str, ground_truth: Optional[List[Tupl
     degraded_detected = "INSUFFICIENT EVIDENCE" in answer_degraded and "CONTROLLER_AUDIT" in answer_degraded
 
     elapsed = (time.perf_counter() - start_t) * 1000
-
     path_continuity_str = "100% (Unbroken Purdue Chain)" if continuity_pct == 100.0 else f"{continuity_pct}% (Purdue Chain)"
-    provenance_accuracy_str = "100% (Cryptographic Hashes)" if provenance_accuracy == 100.0 else f"{provenance_accuracy}%"
 
     return {
         "method": "GraphMemory Agent (Ours)",
         "path_continuity": path_continuity_str,
         "continuity_pct": continuity_pct,
         "provenance_accuracy": provenance_accuracy_str,
-        "hallucination_rate": "0.0% (Strict Allowlist Enforcement)",
+        "hallucination_rate": hallucination_str,
         "missing_evidence_detection": "YES (Degraded Policy Enforced)" if degraded_detected else "NO",
         "tokens_consumed": llm.tokens,
         "latency_ms": round(elapsed, 2),

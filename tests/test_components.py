@@ -950,7 +950,7 @@ class TestGraphMemoryAgent(unittest.TestCase):
 
         res_agent = benchmark.benchmark_graph_memory_agent(case_dir)
         self.assertEqual(res_agent["path_continuity"], "100% (Unbroken Purdue Chain)")
-        self.assertEqual(res_agent["provenance_accuracy"], "100% (Cryptographic Hashes)")
+        self.assertEqual(res_agent["provenance_accuracy"], "100.0% (Cryptographic Hashes)")
         self.assertEqual(res_agent["hallucination_rate"], "0.0% (Strict Allowlist Enforcement)")
 
     def test_source_identifier_sha256_and_record_identity(self):
@@ -1385,6 +1385,173 @@ class TestGraphMemoryAgent(unittest.TestCase):
         self.assertIn("INSUFFICIENT EVIDENCE", ans)
         self.assertIn("CONTROLLER_AUDIT", ans)
         self.assertIn("degraded", ans.lower())
+
+    def test_adversarial_immutable_target_binding_answer_cannot_override_target(self):
+        """v0.5.3: Verification that target controller is anchored to question and cannot be overridden by answer."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        # Create a valid fact for a DIFFERENT controller (plc-other-01)
+        other_fid = "deadbeef12345678deadbeef12345678_R1_controller_cip_1"
+        kg.source_hashes["deadbeef12345678deadbeef12345678"] = "deadbeef" * 8
+        kg.atomic_facts[other_fid] = AtomicFact(
+            fact_id=other_fid,
+            chunk_id=1,
+            text="ENG-WS-02 modified logic on PLC-OTHER-01",
+            source_id="deadbeef12345678deadbeef12345678",
+            source_record_id="cip_other_1",
+            subject="eng-ws-02",
+            relation="modified_logic",
+            object_entity="plc-other-01",
+            source_type="CONTROLLER_AUDIT",
+            evidence_basis="DIRECT_TELEMETRY"
+        )
+        kg.node_to_facts.setdefault("plc-other-01", []).append(other_fid)
+
+        # LLM cites valid fact for plc-other-01, attempting to answer question about plc-ballast-01
+        client = MockOllamaClient(responses={
+            "Target Question": f"The compromise reached the PLC. Workstation downloaded modified logic to plc-other-01 [{other_fid}]."
+        })
+        agent = GraphReaderAgent(client, kg)
+        agent.notebook.add_note(step=1, source_node="plc-other-01", content="Modified logic on plc-other-01", fact_ids=[other_fid])
+
+        # Question asks about plc-ballast-01
+        q = "Did the enterprise compromise reach the PLC plc-ballast-01?"
+        ans = agent.synthesize_answer(q)
+        self.assertIn("INSUFFICIENT EVIDENCE", ans)
+        self.assertTrue("plc-other-01" in ans or "plc-ballast-01" in ans)
+
+    def test_adversarial_structured_claim_wrong_controller_fails_closed(self):
+        """v0.5.3: Structured JSON claim asserting wrong controller fails closed against expected target."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        other_fid = "feedface12345678feedface12345678_R1_controller_cip_1"
+        kg.source_hashes["feedface12345678feedface12345678"] = "feedface" * 8
+        kg.atomic_facts[other_fid] = AtomicFact(
+            fact_id=other_fid,
+            chunk_id=1,
+            text="ENG-WS-02 modified logic on PLC-OTHER-01",
+            source_id="feedface12345678feedface12345678",
+            source_record_id="cip_other_2",
+            subject="eng-ws-02",
+            relation="modified_logic",
+            object_entity="plc-other-01",
+            source_type="CONTROLLER_AUDIT",
+            evidence_basis="DIRECT_TELEMETRY"
+        )
+
+        structured_resp = (
+            '```json\n'
+            '{\n'
+            f'  "answer": "Modified logic on PLC [{other_fid}]",\n'
+            f'  "cited_fact_ids": ["{other_fid}"],\n'
+            '  "claims": [\n'
+            '    {\n'
+            '      "statement": "The attacker downloaded modified logic to the controller",\n'
+            f'      "fact_ids": ["{other_fid}"]\n'
+            '    }\n'
+            '  ]\n'
+            '}\n'
+            '```'
+        )
+        client = MockOllamaClient(responses={"Target Question": structured_resp})
+        agent = GraphReaderAgent(client, kg)
+        agent.notebook.add_note(step=1, source_node="plc-other-01", content="Modified logic", fact_ids=[other_fid])
+
+        q = "Did the compromise download modified logic to plc-ballast-01?"
+        ans = agent.synthesize_answer(q)
+        self.assertIn("INSUFFICIENT EVIDENCE", ans)
+        self.assertIn("plc-ballast-01", ans)
+
+    def test_all_predicates_enforcement_missing_one_fails_closed(self):
+        """v0.5.3: Verification that all-predicate policy fails closed if either predicate is missing."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        cip_facts = [f for f in kg.atomic_facts.values() if f.relation == "modified_logic"]
+        valve_facts = [f for f in kg.atomic_facts.values() if f.relation == "interlock_status"]
+        self.assertTrue(len(cip_facts) > 0 and len(valve_facts) > 0)
+
+        q = "Did the enterprise compromise reach the PLC and bypass safety interlocks?"
+
+        # Case 1: Notebook has ONLY modified_logic (missing interlock_status)
+        client1 = MockOllamaClient(responses={"Target Question": f"PLC reached [{cip_facts[0].fact_id}]."})
+        agent1 = GraphReaderAgent(client1, kg)
+        agent1.notebook.add_note(step=1, source_node="eng-ws-02", content="PLC modified", fact_ids=[cip_facts[0].fact_id])
+        ans1 = agent1.synthesize_answer(q)
+        self.assertIn("INSUFFICIENT EVIDENCE", ans1)
+        self.assertIn("interlock_status", ans1)
+
+        # Case 2: Notebook has ONLY interlock_status (missing modified_logic)
+        client2 = MockOllamaClient(responses={"Target Question": f"Interlock bypassed [{valve_facts[0].fact_id}]."})
+        agent2 = GraphReaderAgent(client2, kg)
+        agent2.notebook.add_note(step=1, source_node="obs-valve", content="Interlock bypassed", fact_ids=[valve_facts[0].fact_id])
+        ans2 = agent2.synthesize_answer(q)
+        self.assertIn("INSUFFICIENT EVIDENCE", ans2)
+        self.assertIn("modified_logic", ans2)
+
+    def test_end_to_end_zeek_tsv_fixtures_ingestion(self):
+        """v0.5.3: Real end-to-end Zeek TSV ingestion test with conn.log, dns.log, and notice.log fixtures."""
+        import tempfile, shutil
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        fixture_dir = os.path.join(base_dir, "examples", "zeek_fixtures")
+
+        temp_case = tempfile.mkdtemp()
+        try:
+            # Copy fixtures to temp case directory
+            os.makedirs(os.path.join(temp_case, "logs"), exist_ok=True)
+            for f in ["conn.log", "dns.log", "notice.log"]:
+                shutil.copy(os.path.join(fixture_dir, f), os.path.join(temp_case, "logs", f))
+
+            manifest = {
+                "case_id": "TEST-ZEEK-FULL",
+                "title": "Comprehensive Zeek TSV Fixtures Ingestion Case",
+                "evidence_sources": {
+                    "network_conn": ["logs/conn.log"],
+                    "network_dns": ["logs/dns.log"],
+                    "network_notice": ["logs/notice.log"]
+                }
+            }
+            with open(os.path.join(temp_case, "case_manifest.json"), "w", encoding="utf-8") as fh:
+                json.dump(manifest, fh)
+
+            loader = CaseLoader(temp_case)
+            kg = loader.load_case()
+
+            # 1. Check conn.log facts
+            conn_facts = [f for f in kg.atomic_facts.values() if f.source_type == "ZEEK_CONN"]
+            self.assertEqual(len(conn_facts), 2)
+            cf1 = [f for f in conn_facts if f.subject == "10.10.4.19" and f.object_entity == "10.10.30.15"][0]
+            self.assertEqual(cf1.relation, "communicated_with")
+            self.assertEqual(cf1.attributes.get("source_port"), 49152) # Parsed port as int
+            self.assertEqual(cf1.attributes.get("service"), "http")
+            self.assertIn("+00:00", cf1.event_time) # Normalized fractional epoch to UTC ISO
+
+            # 2. Check dns.log facts
+            dns_facts = [f for f in kg.atomic_facts.values() if f.source_type == "ZEEK_DNS"]
+            self.assertEqual(len(dns_facts), 1)
+            df = dns_facts[0]
+            self.assertEqual(df.relation, "queried_dns")
+            self.assertEqual(df.object_entity, "historian.pilbara.internal")
+            self.assertEqual(df.attributes.get("answers"), ["10.10.30.15", "10.10.30.16"]) # Parsed vector[string]
+
+            # 3. Check notice.log facts
+            notice_facts = [f for f in kg.atomic_facts.values() if f.source_type == "ZEEK_NOTICE"]
+            self.assertEqual(len(notice_facts), 1)
+            nf = notice_facts[0]
+            self.assertEqual(nf.relation, "triggered_notice")
+            self.assertEqual(nf.object_entity, "notice::industrial_zone_violation")
+            self.assertEqual(nf.attributes.get("message"), "Unauthorized L4 to L3.5 Historian SQL Export") # Unescaped \x20
+            self.assertIn("Notice::ACTION_ALARM", nf.attributes.get("actions"))
+        finally:
+            shutil.rmtree(temp_case)
 
 
 if __name__ == "__main__":

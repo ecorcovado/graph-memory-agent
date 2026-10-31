@@ -16,9 +16,25 @@ class ZeekAdapter(BaseLogAdapter):
     """Adapter for Zeek / Bro network security monitoring telemetry."""
 
     @staticmethod
-    def parse_tsv_headers(line_str: str) -> List[str]:
-        """Extracts field names from a Zeek #fields metadata line."""
-        parts = line_str.strip().split("\t")
+    def parse_tsv_separator(line_str: str) -> str:
+        """Extracts declared delimiter from a Zeek #separator line, e.g. '#separator \\x09' -> '\\t'."""
+        line = line_str.strip()
+        if line.startswith("#separator"):
+            parts = line.split(maxsplit=1)
+            if len(parts) > 1:
+                raw_sep = parts[1].strip()
+                if raw_sep.startswith(r"\x"):
+                    try:
+                        return chr(int(raw_sep[2:], 16))
+                    except ValueError:
+                        return "\t"
+                return raw_sep
+        return "\t"
+
+    @staticmethod
+    def parse_tsv_headers(line_str: str, separator: str = "\t") -> List[str]:
+        """Extracts field names from a Zeek #fields metadata line respecting declared separator."""
+        parts = line_str.strip().split(separator)
         if parts and parts[0].startswith("#fields"):
             parts = parts[1:]
         elif parts and parts[0].startswith("#"):
@@ -28,29 +44,78 @@ class ZeekAdapter(BaseLogAdapter):
         return [p.strip() for p in parts if p.strip()]
 
     @staticmethod
-    def parse_tsv_line(fields: List[str], line_str: str) -> Dict[str, Any]:
-        """Converts a tab-separated Zeek log line into a normalized dictionary."""
-        parts = line_str.split("\t")
+    def parse_tsv_types(line_str: str, separator: str = "\t") -> List[str]:
+        """Extracts data types from a Zeek #types metadata line respecting declared separator."""
+        parts = line_str.strip().split(separator)
+        if parts and parts[0].startswith("#types"):
+            parts = parts[1:]
+        elif parts and parts[0].startswith("#"):
+            parts = line_str.strip().split()
+            if len(parts) > 1 and parts[0] == "#types":
+                parts = parts[1:]
+        return [p.strip() for p in parts if p.strip()]
+
+    @staticmethod
+    def unescape_zeek_string(val: str) -> str:
+        """Unescapes Zeek hex escape sequences (e.g. \\x20 -> ' ', \\x09 -> '\\t')."""
+        if not val or r"\x" not in val:
+            return val
+        return re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), val)
+
+    @classmethod
+    def parse_tsv_line(
+        cls,
+        fields: List[str],
+        line_str: str,
+        types: Optional[List[str]] = None,
+        separator: str = "\t",
+        unset_field: str = "-",
+        empty_field: str = "(empty)",
+    ) -> Dict[str, Any]:
+        """Converts a separated Zeek log line into a normalized dictionary using field names and type metadata."""
+        parts = line_str.split(separator)
         record: Dict[str, Any] = {}
         for idx, field_name in enumerate(fields):
+            field_type = types[idx].lower() if types and idx < len(types) else ""
             if idx < len(parts):
                 val = parts[idx].strip()
-                if val == "-" or val == "(empty)":
+                if val == unset_field:
                     record[field_name] = None
+                elif val == empty_field:
+                    record[field_name] = [] if field_type.startswith("set") or field_type.startswith("vector") else ""
                 else:
-                    # Attempt numeric cast for ports and counts
-                    if field_name in ["id.orig_p", "id.resp_p", "orig_bytes", "resp_bytes", "orig_pkts", "resp_pkts"]:
+                    # Unescape string values
+                    unescaped_val = cls.unescape_zeek_string(val)
+                    # 1. Cast by Zeek #types metadata if available
+                    if field_type in ["time", "interval", "double"]:
                         try:
-                            record[field_name] = int(val)
+                            record[field_name] = float(unescaped_val)
                         except ValueError:
-                            record[field_name] = val
-                    elif field_name in ["ts", "duration"]:
+                            record[field_name] = unescaped_val
+                    elif field_type in ["port", "count", "int"]:
                         try:
-                            record[field_name] = float(val)
+                            record[field_name] = int(unescaped_val)
                         except ValueError:
-                            record[field_name] = val
+                            record[field_name] = unescaped_val
+                    elif field_type == "bool":
+                        record[field_name] = unescaped_val.lower() in ("t", "true", "1")
+                    elif field_type.startswith("set") or field_type.startswith("vector"):
+                        items = [cls.unescape_zeek_string(v.strip()) for v in unescaped_val.split(",") if v.strip()]
+                        record[field_name] = items
                     else:
-                        record[field_name] = val
+                        # 2. Heuristic fallback when #types is omitted
+                        if field_name in ["id.orig_p", "id.resp_p", "orig_bytes", "resp_bytes", "orig_pkts", "resp_pkts"]:
+                            try:
+                                record[field_name] = int(unescaped_val)
+                            except ValueError:
+                                record[field_name] = unescaped_val
+                        elif field_name in ["ts", "duration"]:
+                            try:
+                                record[field_name] = float(unescaped_val)
+                            except ValueError:
+                                record[field_name] = unescaped_val
+                        else:
+                            record[field_name] = unescaped_val
             else:
                 record[field_name] = None
         return record
