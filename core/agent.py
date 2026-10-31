@@ -105,11 +105,12 @@ class GraphReaderAgent:
         )
         selected = self.llm.generate(prompt=user_prompt, system=sys_prompt, temperature=0.1).strip().lower()
 
-        # 1. Exact or substring match against LLM output
-        for node in nodes:
-            if node == selected or node in selected or selected in node:
-                self._log("2. INITIAL NODE SELECTED", f"Target: '{node}'")
-                return node
+        # 1. Exact match against LLM output (requires non-empty selection to prevent empty substring bug)
+        if selected:
+            for node in nodes:
+                if node == selected:
+                    self._log("2. INITIAL NODE SELECTED", f"Target: '{node}'")
+                    return node
 
         # 2. Fallback: match against question & plan keywords
         combined_text = f"{question} {plan}".lower()
@@ -207,7 +208,8 @@ class GraphReaderAgent:
         decision = self.llm.generate(prompt=decision_prompt, system=sys_prompt_dec, temperature=0.1).strip()
         self._log(f"STEP {step}: AGENT DECISION", decision)
 
-        if "TERMINATE" in decision.upper():
+        # Explicit termination check: requires exact ACTION: TERMINATE or standalone keyword (avoids DO NOT TERMINATE bug)
+        if re.search(r"\bACTION:\s*TERMINATE\b", decision, re.IGNORECASE) or decision.strip().upper() == "TERMINATE":
             return None, True
 
         # Parse target neighbor from decision
@@ -264,8 +266,8 @@ class GraphReaderAgent:
         )
         answer = self.llm.generate(prompt=prompt, system=sys_prompt, temperature=0.1)
 
-        # Deterministic Evidence Verification Check (Fail-Closed)
-        cited_fact_ids = set(re.findall(r"\b(C\d+_F\d+)\b", answer))
+        # Deterministic Evidence Verification Check (Fail-Closed, supports hash-prefixed and ordinal IDs)
+        cited_fact_ids = set(re.findall(r"\b([a-f0-9]{6}_C\d+_F\d+|C\d+_F\d+)\b", answer))
         invalid_citations = cited_fact_ids - verified_fact_ids
 
         if invalid_citations:

@@ -1,7 +1,7 @@
 """
 Comprehensive unit tests for GraphMemory-Agent core components.
 Ensures MultiDiGraph directed construction, strict allowlist edge tiers,
-fail-closed evidence auditing, provenance-preserving deduplication, and budget assembly function offline.
+fail-closed evidence auditing, multi-source provenance merging, and budget assembly function offline.
 """
 
 import unittest
@@ -68,7 +68,7 @@ class TestGraphMemoryAgent(unittest.TestCase):
         self.assertEqual(classify_relation("executed"), "OBSERVED")
         self.assertEqual(classify_relation("modified_registry"), "OBSERVED")
 
-        # Threat intel
+        # Threat intel / context
         self.assertEqual(classify_relation("attributed_to"), "INTELLIGENCE_REPORTED")
         self.assertEqual(classify_relation("known_technique"), "INTELLIGENCE_REPORTED")
 
@@ -81,6 +81,13 @@ class TestGraphMemoryAgent(unittest.TestCase):
         self.assertEqual(classify_relation("registry_unmodified"), "UNCLASSIFIED")
         self.assertEqual(classify_relation("custom_random_predicate"), "UNCLASSIFIED")
 
+    def test_biographical_predicates_not_observed(self):
+        # Biographical facts must be INTELLIGENCE_REPORTED (asserted facts), never live OBSERVED telemetry
+        self.assertEqual(classify_relation("founded_inside"), "INTELLIGENCE_REPORTED")
+        self.assertEqual(classify_relation("architected"), "INTELLIGENCE_REPORTED")
+        self.assertEqual(classify_relation("previously_worked_at"), "INTELLIGENCE_REPORTED")
+        self.assertEqual(classify_relation("worked_at"), "INTELLIGENCE_REPORTED")
+
     def test_missing_edge_metadata_defaults_unclassified(self):
         kg = KnowledgeGraph()
         # Add an edge with NO classification attribute
@@ -89,21 +96,24 @@ class TestGraphMemoryAgent(unittest.TestCase):
         rel_data = kg.get_neighbors_with_relations("nodeA")
         self.assertEqual(len(rel_data), 1)
         direction, rel, cls, target = rel_data[0]
-        # Must default to UNCLASSIFIED, never OBSERVED
         self.assertEqual(cls, "UNCLASSIFIED")
 
-    def test_provenance_preserving_deduplication(self):
+    def test_multi_source_provenance_preserving_deduplication(self):
         nb = Notebook(max_tokens=500)
-        # Note from Source A with C0_F1
-        nb.add_note(step=1, source_node="nodeA", content="Identical summary of event.", fact_ids=["C0_F1"])
-        # Same summary from Source B with C1_F3
-        nb.add_note(step=2, source_node="nodeB", content="Identical summary of event.", fact_ids=["C1_F3"])
+        # Note from Source A with C0_F1 and excerpt A
+        nb.add_note(step=1, source_node="nodeA", content="Identical summary of event.", fact_ids=["C0_F1"], source_excerpt="Excerpt A")
+        # Same summary from Source B with C1_F3 and excerpt B
+        nb.add_note(step=2, source_node="nodeB", content="Identical summary of event.", fact_ids=["C1_F3"], source_excerpt="Excerpt B")
 
-        # Notes list should have 1 merged note preserving BOTH fact IDs
+        # Notes list should have 1 merged note preserving BOTH source nodes, fact IDs, and excerpts
         self.assertEqual(len(nb.notes), 1)
-        merged_ids = nb.notes[0].fact_ids
-        self.assertIn("C0_F1", merged_ids)
-        self.assertIn("C1_F3", merged_ids)
+        note = nb.notes[0]
+        self.assertIn("nodeA", note.source_nodes)
+        self.assertIn("nodeB", note.source_nodes)
+        self.assertIn("C0_F1", note.fact_ids)
+        self.assertIn("C1_F3", note.fact_ids)
+        self.assertIn("Excerpt A", note.source_excerpts)
+        self.assertIn("Excerpt B", note.source_excerpts)
 
     def test_notebook_token_budget_and_eviction(self):
         nb = Notebook(max_tokens=50, max_single_note_tokens=40)
@@ -165,6 +175,45 @@ class TestGraphMemoryAgent(unittest.TestCase):
         ranked = agent.rank_candidate_neighbors("workstation-402", candidates, "What IP communicated?")
         self.assertEqual(ranked[0], "198.51.100.44")
 
+    def test_empty_initial_node_selection_does_not_match_first_node(self):
+        kg = KnowledgeGraph()
+        kg.graph.add_node("alpha_node")
+        kg.graph.add_node("beta_node")
+        kg.graph.add_node("gamma_node")
+
+        # Mock returns empty string
+        client = MockOllamaClient(responses={"Available Graph Nodes": ""})
+        agent = GraphReaderAgent(client, kg)
+
+        # Empty selection must not match alpha_node via empty substring; must fall back to keyword overlap
+        selected = agent.select_initial_node(
+            question="Where is gamma located?",
+            plan="Investigate gamma"
+        )
+        self.assertEqual(selected, "gamma_node")
+
+    def test_do_not_terminate_does_not_stop_exploration(self):
+        kg = KnowledgeGraph()
+        kg.graph.add_node("nodeA")
+        kg.graph.add_node("nodeB")
+        kg.graph.add_edge("nodeA", "nodeB", relation="connected_to", classification="OBSERVED")
+
+        # LLM response contains "DO NOT TERMINATE"
+        client = MockOllamaClient(responses={
+            "Decision": "DO NOT TERMINATE! ACTION: HOP | nodeB"
+        })
+        agent = GraphReaderAgent(client, kg)
+
+        next_node, should_terminate = agent.explore_node(
+            current_node="nodeA",
+            question="Find node?",
+            plan="Traverse",
+            step=1,
+            visited_nodes=set()
+        )
+        self.assertFalse(should_terminate)
+        self.assertEqual(next_node, "nodeB")
+
     def test_exact_traversal_and_visited_safeguard(self):
         kg = KnowledgeGraph()
         kg.graph.add_node("workstation-402")
@@ -172,8 +221,7 @@ class TestGraphMemoryAgent(unittest.TestCase):
         kg.graph.add_edge("workstation-402", "workstation-402-backup", relation="connected_to", classification="OBSERVED")
 
         client = MockOllamaClient(responses={
-            # Target tries to propose partial substring "workstation" which is ambiguous
-            "ACTION:": "HOP | workstation"
+            "Decision": "ACTION: HOP | workstation"
         })
         agent = GraphReaderAgent(client, kg)
 
@@ -184,7 +232,6 @@ class TestGraphMemoryAgent(unittest.TestCase):
             step=1,
             visited_nodes={"workstation-402"}
         )
-        # Because "workstation" is not an exact node name, it must auto-route to the unvisited neighbor
         self.assertEqual(next_node, "workstation-402-backup")
 
     def test_evidence_audit_fail_closed_on_fabricated_id(self):
@@ -196,7 +243,6 @@ class TestGraphMemoryAgent(unittest.TestCase):
         agent.notebook.add_note(step=1, source_node="host", content="Valid note", fact_ids=["C0_F1"])
 
         answer = agent.synthesize_answer("What task was used?")
-        # Must fail closed with INSUFFICIENT EVIDENCE
         self.assertIn("INSUFFICIENT EVIDENCE", answer)
         self.assertIn("C99_F99", answer)
 
@@ -209,7 +255,6 @@ class TestGraphMemoryAgent(unittest.TestCase):
         agent.notebook.add_note(step=1, source_node="host", content="Valid note", fact_ids=["C0_F1"])
 
         answer = agent.synthesize_answer("What task was used?")
-        # Must fail closed because no atomic fact IDs were cited
         self.assertIn("INSUFFICIENT EVIDENCE", answer)
         self.assertIn("no verifiable citations", answer)
 

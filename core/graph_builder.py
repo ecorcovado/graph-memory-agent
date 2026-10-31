@@ -4,6 +4,7 @@ Extracts atomic facts from text and constructs a directed MultiDiGraph in Networ
 with typed relationships, provenance tracking, and explicit 4K context bounds.
 """
 
+import hashlib
 import json
 import re
 import urllib.request
@@ -20,16 +21,17 @@ def normalize_entity(name: str) -> str:
     return cleaned
 
 
+# Strict forensic classification allowlists
 OBSERVED_PREDICATES = {
     "communicated_with", "connected_to", "executed", "created", "dropped_file",
     "modified_registry", "logged_into", "downloaded", "established_beacon",
-    "founded_inside", "architected", "worked_at", "previously_worked_at",
     "modified_logic", "sent_command", "authenticated_to", "scanned",
 }
 
 INTELLIGENCE_PREDICATES = {
     "attributed_to", "known_technique", "associated_with", "suspected_actor",
     "maintains_persistence", "uses_malware", "targets_sector", "aliases",
+    "founded_inside", "architected", "worked_at", "previously_worked_at", "affiliated_with",
 }
 
 
@@ -211,6 +213,7 @@ class GraphBuilder:
         )
         raw_output = self.llm.generate(prompt=user_prompt, system=sys_prompt, temperature=0.1)
 
+        doc_hash = hashlib.sha256(chunk.encode("utf-8")).hexdigest()[:6]
         extracted_facts = []
         lines = raw_output.split("\n")
         fact_counter = 1
@@ -239,7 +242,7 @@ class GraphBuilder:
                     if norm_extra and norm_extra not in key_elements:
                         key_elements.append(norm_extra)
 
-                fact_id = f"C{chunk_id}_F{fact_counter}"
+                fact_id = f"{doc_hash}_C{chunk_id}_F{fact_counter}"
                 fact_counter += 1
 
                 extracted_facts.append(

@@ -56,9 +56,9 @@ This project runs **100% locally** via Ollama. It extracts a directed `MultiDiGr
 
 * **Directed MultiDiGraph with Strict Forensic Tiers:** Distinguishes relationship directions (`Host -> communicated_with -> IP` vs reverse) and enforces strict exact allowlists for forensic classifications (`OBSERVED`, `INTELLIGENCE_REPORTED`, `CO_OCCURRENCE`). Substrings like `not_executed` strictly default to `UNCLASSIFIED`, and unannotated edges are never presumed observed.
 * **Centralized Prompt Budget Assembler:** 100% of LLM calls (including fact extraction) pass through `PromptBudgetManager.assemble_prompt()` to strictly allocate context budgets (system instructions: 400t, query/plan: 300t, notebook: 1,000t, context: 1,300t, instructions: 200t, output reserve: 500t) and clamp candidate nodes to guarantee requests never exceed 4,096 tokens.
-* **Bounded Provenance Memory (`EvidenceNote`):** Enforces a 1,000-token budget with immutable `frozen=True` dataclasses, tuple-based `fact_ids`, source excerpts, per-note clamping, FIFO eviction, and **provenance-preserving deduplication** (merging fact IDs from multiple sources rather than discarding them).
+* **Bounded Provenance Memory (`EvidenceNote`):** Enforces a 1,000-token budget with immutable `frozen=True` dataclasses, collision-resistant SHA-256 chunk-hashed `fact_ids` (`f"{doc_hash}_C{chunk_id}_F{counter}"`), multi-source provenance tuples (`source_nodes: Tuple[str, ...]`, `source_excerpts: Tuple[str, ...]`), per-note clamping, FIFO eviction, and **multi-source provenance-preserving deduplication** (merging fact IDs, source nodes, and source excerpts across multiple references rather than discarding secondary evidence).
 * **Explicit Context & Output Limits:** Passes `"options": {"num_ctx": 4096, "num_predict": 500}` directly to the Ollama API.
-* **Resilient Node Selection & Forensic Routing:** Disallows ambiguous substring target matching and loops to already visited nodes. Routes fallback hops by forensic edge tier (`OBSERVED` prioritized over `CO_OCCURRENCE`).
+* **Resilient Node Selection & Forensic Routing:** Disallows ambiguous substring target matching and empty-string false matches; strictly isolates biographical predicates to intelligence tiers; requires regex-bounded termination (`\bACTION:\s*TERMINATE\b`) to prevent false terminations on phrases like "DO NOT TERMINATE"; and diverts visited loops via forensic edge rank (`OBSERVED` prioritized over `CO_OCCURRENCE`).
 * **Deterministic Fail-Closed Evidence Verification:** Synthesized answers are audited against verified fact IDs. If the model cites fabricated fact IDs or provides uncited claims, the system **fails closed** and returns `INSUFFICIENT EVIDENCE`.
 
 ---
@@ -151,7 +151,7 @@ graph-memory-agent/
 ├── examples/
 │   └── cyber_incident_report.txt # DFIR incident triage scenario
 ├── tests/
-│   └── test_components.py # 12 offline unit tests (fail-closed auditing, allowlists, deduplication, assembly)
+│   └── test_components.py # 15 offline unit tests (fail-closed auditing, allowlists, deduplication, regex termination, empty node selection)
 ├── run_agent.py           # CLI entry point
 └── README.md
 ```

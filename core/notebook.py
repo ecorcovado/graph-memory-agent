@@ -1,6 +1,6 @@
 """
 Notebook Scratchpad (Inspired by GraphReader - arXiv:2406.14550)
-Maintains bounded, immutable source-linked EvidenceNotes with fact IDs,
+Maintains bounded, immutable source-linked EvidenceNotes with multi-source provenance,
 per-note length clamping, and strict token budget enforcement.
 """
 
@@ -11,13 +11,21 @@ from core.budget_manager import PromptBudgetManager
 
 @dataclass(frozen=True)
 class EvidenceNote:
-    """Immutable evidence record with provenance references."""
+    """Immutable evidence record with multi-source provenance references."""
     step: int
-    source_node: str
+    source_nodes: Tuple[str, ...] = field(default_factory=tuple)
     fact_ids: Tuple[str, ...] = field(default_factory=tuple)
-    source_excerpt: str = ""
+    source_excerpts: Tuple[str, ...] = field(default_factory=tuple)
     content: str = ""
     confidence: float = 1.0
+
+    @property
+    def source_node(self) -> str:
+        return self.source_nodes[0] if self.source_nodes else ""
+
+    @property
+    def source_excerpt(self) -> str:
+        return self.source_excerpts[0] if self.source_excerpts else ""
 
 
 class Notebook:
@@ -34,7 +42,7 @@ class Notebook:
     def estimate_tokens(self) -> int:
         """Estimates total tokens currently consumed across all notes."""
         total_text = " ".join(
-            f"{n.source_node} {' '.join(n.fact_ids)} {n.source_excerpt} {n.content}"
+            f"{' '.join(n.source_nodes)} {' '.join(n.fact_ids)} {' '.join(n.source_excerpts)} {n.content}"
             for n in self.notes
         )
         return PromptBudgetManager.estimate_tokens(total_text)
@@ -48,27 +56,31 @@ class Notebook:
         source_excerpt: str = "",
         confidence: float = 1.0,
     ):
-        """Adds an immutable source-linked evidence note with length clamping and budget enforcement."""
+        """Adds an immutable source-linked evidence note with multi-source merging."""
         content = content.strip()
         if not content:
             return
 
-        # Clamp individual note length to prevent a single oversized LLM output from overflowing
         clamped_content = PromptBudgetManager.clamp_text(content, self.max_single_note_tokens)
-        clamped_excerpt = PromptBudgetManager.clamp_text(source_excerpt, 150)
+        clamped_excerpt = PromptBudgetManager.clamp_text(source_excerpt, 150) if source_excerpt else ""
         immutable_fact_ids = tuple(sorted(set(fact_ids))) if fact_ids else ()
 
         # Provenance-preserving deduplication:
-        # If content matches an existing note, merge the fact IDs and source references rather than discarding!
+        # Merge source nodes, fact IDs, and source excerpts across multiple corroborating sources
         for idx, n in enumerate(self.notes):
             if clamped_content.lower() == n.content.lower():
+                merged_nodes = tuple(sorted(set(n.source_nodes + (source_node,))))
                 merged_ids = tuple(sorted(set(n.fact_ids + immutable_fact_ids)))
-                merged_excerpt = n.source_excerpt or clamped_excerpt
+                new_excerpts = list(n.source_excerpts)
+                if clamped_excerpt and clamped_excerpt not in new_excerpts:
+                    new_excerpts.append(clamped_excerpt)
+                merged_excerpts = tuple(new_excerpts)
+
                 self.notes[idx] = EvidenceNote(
                     step=n.step,
-                    source_node=n.source_node,
+                    source_nodes=merged_nodes,
                     fact_ids=merged_ids,
-                    source_excerpt=merged_excerpt,
+                    source_excerpts=merged_excerpts,
                     content=n.content,
                     confidence=max(n.confidence, confidence),
                 )
@@ -77,9 +89,9 @@ class Notebook:
 
         note = EvidenceNote(
             step=step,
-            source_node=source_node,
+            source_nodes=(source_node,),
             fact_ids=immutable_fact_ids,
-            source_excerpt=clamped_excerpt,
+            source_excerpts=(clamped_excerpt,) if clamped_excerpt else (),
             content=clamped_content,
             confidence=confidence,
         )
@@ -108,10 +120,11 @@ class Notebook:
             return "No verified notes recorded yet."
         formatted = []
         for n in self.notes:
+            nodes_str = ", ".join(n.source_nodes)
             facts_str = f" [Facts: {', '.join(n.fact_ids)}]" if n.fact_ids else ""
-            excerpt_str = f"\n  Source Excerpt: \"{n.source_excerpt}\"" if n.source_excerpt else ""
+            excerpts_str = f"\n  Sources: {' | '.join(n.source_excerpts)}" if n.source_excerpts else ""
             formatted.append(
-                f"[Step {n.step} | Node: {n.source_node}{facts_str}]{excerpt_str}\n  Evidence: {n.content}"
+                f"[Step {n.step} | Sources: {nodes_str}{facts_str}]{excerpts_str}\n  Evidence: {n.content}"
             )
         return "\n\n".join(formatted)
 
