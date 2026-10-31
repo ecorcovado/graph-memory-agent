@@ -1,19 +1,20 @@
 """
 Notebook Scratchpad (Inspired by GraphReader - arXiv:2406.14550)
-Maintains bounded, source-linked evidence notes with immutable fact IDs,
+Maintains bounded, immutable source-linked EvidenceNotes with fact IDs,
 per-note length clamping, and strict token budget enforcement.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Set
+from typing import List, Set, Tuple
 from core.budget_manager import PromptBudgetManager
 
 
-@dataclass
+@dataclass(frozen=True)
 class EvidenceNote:
+    """Immutable evidence record with provenance references."""
     step: int
     source_node: str
-    fact_ids: List[str] = field(default_factory=list)
+    fact_ids: Tuple[str, ...] = field(default_factory=tuple)
     source_excerpt: str = ""
     content: str = ""
     confidence: float = 1.0
@@ -47,7 +48,7 @@ class Notebook:
         source_excerpt: str = "",
         confidence: float = 1.0,
     ):
-        """Adds a source-linked evidence note with length clamping and budget enforcement."""
+        """Adds an immutable source-linked evidence note with length clamping and budget enforcement."""
         content = content.strip()
         if not content:
             return
@@ -61,10 +62,12 @@ class Notebook:
             if clamped_content.lower() == n.content.lower():
                 return
 
+        immutable_fact_ids = tuple(sorted(set(fact_ids))) if fact_ids else ()
+
         note = EvidenceNote(
             step=step,
             source_node=source_node,
-            fact_ids=fact_ids or [],
+            fact_ids=immutable_fact_ids,
             source_excerpt=clamped_excerpt,
             content=clamped_content,
             confidence=confidence,
@@ -84,6 +87,10 @@ class Notebook:
             facts.update(n.fact_ids)
         return facts
 
+    def verify_citation(self, fact_id: str) -> bool:
+        """Verifies if a specific fact ID was legitimately gathered during investigation."""
+        return fact_id in self.get_all_fact_ids()
+
     def format_for_prompt(self) -> str:
         """Formats the notebook memory for LLM context inclusion."""
         if not self.notes:
@@ -91,7 +98,7 @@ class Notebook:
         formatted = []
         for n in self.notes:
             facts_str = f" [Facts: {', '.join(n.fact_ids)}]" if n.fact_ids else ""
-            excerpt_str = f"\n  Source: \"{n.source_excerpt}\"" if n.source_excerpt else ""
+            excerpt_str = f"\n  Source Excerpt: \"{n.source_excerpt}\"" if n.source_excerpt else ""
             formatted.append(
                 f"[Step {n.step} | Node: {n.source_node}{facts_str}]{excerpt_str}\n  Evidence: {n.content}"
             )

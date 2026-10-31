@@ -6,7 +6,7 @@ and deterministic evidence-verified answer reasoning within a strict 4K context 
 
 import json
 import re
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 from core.graph_builder import KnowledgeGraph, LocalOllamaClient
 from core.notebook import Notebook
 from core.budget_manager import PromptBudgetManager
@@ -37,16 +37,51 @@ class GraphReaderAgent:
             print(f"\n[{title}]")
             print(f"{text.strip()}")
 
+    def rank_candidate_neighbors(self, current_node: str, candidates: List[str], question: str) -> List[str]:
+        """
+        Ranks unvisited candidate neighbors by forensic edge tier, question keyword overlap, and connectivity.
+        Prioritizes OBSERVED events over INTELLIGENCE_REPORTED or CO_OCCURRENCE.
+        """
+        if not candidates:
+            return []
+
+        q_words = set(question.lower().split())
+        relations = self.kg.get_neighbors_with_relations(current_node)
+
+        scored = []
+        for cand in candidates:
+            score = 0
+            # Tier prioritization
+            for _, _, cls, target in relations:
+                if target == cand:
+                    if cls == "OBSERVED":
+                        score += 50
+                    elif cls == "INTELLIGENCE_REPORTED":
+                        score += 30
+                    elif cls == "UNCLASSIFIED":
+                        score += 15
+                    elif cls == "CO_OCCURRENCE":
+                        score += 5
+
+            # Question keyword overlap
+            if any(w in cand for w in q_words if len(w) > 3):
+                score += 25
+
+            # Graph connectivity
+            score += self.kg.graph.degree(cand)
+            scored.append((score, cand))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [c for _, c in scored]
+
     def generate_rational_plan(self, question: str) -> str:
         """Step 1: Decomposes question into a step-by-step rational plan (Figure 7)."""
-        prompt = (
-            f"You are an investigative cybersecurity assistant. Outline a concise, step-by-step rational plan "
-            f"identifying what key entities, relationships, and clues we need to discover in order "
-            f"to answer this question.\n\n"
-            f"Question: {question}\n\n"
-            f"Rational Plan (1-3 sentences max):"
+        sys_prompt, user_prompt, _ = PromptBudgetManager.assemble_prompt(
+            system_text="You are an investigative cybersecurity assistant.",
+            query_and_plan=f"Target Question: {question}",
+            instructions="Outline a concise, step-by-step rational plan identifying key entities, relationships, and clues to discover.\nRational Plan (1-3 sentences max):",
         )
-        plan = self.llm.generate(prompt=prompt, temperature=0.1)
+        plan = self.llm.generate(prompt=user_prompt, system=sys_prompt, temperature=0.1)
         self._log("1. RATIONAL PLAN", plan)
         return plan
 
@@ -62,14 +97,13 @@ class GraphReaderAgent:
         # Enforce budget manager clamp on candidate nodes list
         bounded_nodes = PromptBudgetManager.clamp_node_list(nodes, max_tokens=300)
 
-        prompt = (
-            f"Question: {question}\n"
-            f"Plan: {plan}\n"
-            f"Available Graph Nodes: {', '.join(bounded_nodes)}\n\n"
-            f"Select exactly ONE starting node from the list above that provides the best entry point for the investigation.\n"
-            f"Output ONLY the exact node name, nothing else."
+        sys_prompt, user_prompt, _ = PromptBudgetManager.assemble_prompt(
+            system_text="You are an expert incident investigator.",
+            query_and_plan=f"Question: {question}\nPlan: {plan}",
+            context_text=f"Available Graph Nodes: {', '.join(bounded_nodes)}",
+            instructions="Select exactly ONE starting node from the list above that provides the best entry point for the investigation.\nOutput ONLY the exact node name, nothing else.",
         )
-        selected = self.llm.generate(prompt=prompt, temperature=0.1).strip().lower()
+        selected = self.llm.generate(prompt=user_prompt, system=sys_prompt, temperature=0.1).strip().lower()
 
         # 1. Exact or substring match against LLM output
         for node in nodes:
@@ -123,19 +157,19 @@ class GraphReaderAgent:
         ) if relations_data else "None"
 
         # 3. Ask agent to inspect facts and take intermediate source-linked notes
-        notes_prompt = (
-            f"You are an investigative agent gathering evidence to answer a multi-hop question.\n\n"
-            f"Target Question: {question}\n"
-            f"Rational Plan: {plan}\n"
-            f"Current Node: '{current_node}'\n"
-            f"Current Notebook Memory:\n{self.notebook.format_for_prompt()}\n\n"
-            f"Atomic Facts at '{current_node}':\n{facts_text}\n\n"
-            f"Instructions:\n"
-            f"Extract all relevant facts or intermediate clues that help execute the plan or connect entities.\n"
-            f"Even if a fact does not give the final answer, record it if it identifies an entity's role, relation, action, or target.\n"
-            f"If no facts are relevant, reply 'NONE'. Otherwise, write a concise summary of the discovered facts:"
+        sys_prompt, notes_prompt, _ = PromptBudgetManager.assemble_prompt(
+            system_text="You are an investigative agent gathering evidence to answer a multi-hop question.",
+            query_and_plan=f"Target Question: {question}\nRational Plan: {plan}",
+            notebook_text=self.notebook.format_for_prompt(),
+            context_text=f"Current Node: '{current_node}'\nAtomic Facts at '{current_node}':\n{facts_text}",
+            instructions=(
+                "Instructions:\n"
+                "Extract all relevant facts or intermediate clues that help execute the plan or connect entities.\n"
+                "Even if a fact does not give the final answer, record it if it identifies an entity's role, relation, action, or target.\n"
+                "If no facts are relevant, reply 'NONE'. Otherwise, write a concise summary of the discovered facts:"
+            ),
         )
-        new_clues = self.llm.generate(prompt=notes_prompt, temperature=0.1).strip()
+        new_clues = self.llm.generate(prompt=notes_prompt, system=sys_prompt, temperature=0.1).strip()
 
         is_none = new_clues.upper().strip() in ["NONE", "NONE.", "'NONE'", '"NONE"']
         if new_clues and not is_none:
@@ -151,22 +185,26 @@ class GraphReaderAgent:
             self._log(f"STEP {step}: NOTEBOOK", f"No new clues extracted at [{current_node}].")
 
         # 4. Decision: Stop or Hop to Neighbor?
-        decision_prompt = (
-            f"Target Question: {question}\n"
-            f"Rational Plan: {plan}\n"
-            f"Current Discovered Clues in Notebook:\n{self.notebook.format_for_prompt()}\n\n"
-            f"Current Graph Node: '{current_node}'\n"
-            f"Connected Edges & Relations:\n{relations_text}\n\n"
-            f"Available Neighbor Nodes: {', '.join(all_neighbors) if all_neighbors else 'None'}\n"
-            f"Unvisited Neighbor Nodes: {', '.join(unvisited_neighbors) if unvisited_neighbors else 'None'}\n\n"
-            f"Task:\n"
-            f"Do we already have sufficient verified evidence in the notebook to definitively answer the target question?\n"
-            f"- If YES: reply strictly 'ACTION: TERMINATE'\n"
-            f"- If NO: select ONE neighbor node to explore next.\n"
-            f"Reply strictly in this format:\n"
-            f"ACTION: HOP | <exact_node_name>\n"
+        sys_prompt_dec, decision_prompt, _ = PromptBudgetManager.assemble_prompt(
+            system_text="You are an investigative agent deciding the next graph traversal step.",
+            query_and_plan=f"Target Question: {question}\nRational Plan: {plan}",
+            notebook_text=self.notebook.format_for_prompt(),
+            context_text=(
+                f"Current Graph Node: '{current_node}'\n"
+                f"Connected Edges & Relations:\n{relations_text}\n\n"
+                f"Available Neighbor Nodes: {', '.join(all_neighbors) if all_neighbors else 'None'}\n"
+                f"Unvisited Neighbor Nodes: {', '.join(unvisited_neighbors) if unvisited_neighbors else 'None'}"
+            ),
+            instructions=(
+                "Task:\n"
+                "Do we already have sufficient verified evidence in the notebook to definitively answer the target question?\n"
+                "- If YES: reply strictly 'ACTION: TERMINATE'\n"
+                "- If NO: select ONE neighbor node to explore next.\n"
+                "Reply strictly in this format:\n"
+                "ACTION: HOP | <exact_node_name>"
+            ),
         )
-        decision = self.llm.generate(prompt=decision_prompt, temperature=0.1).strip()
+        decision = self.llm.generate(prompt=decision_prompt, system=sys_prompt_dec, temperature=0.1).strip()
         self._log(f"STEP {step}: AGENT DECISION", decision)
 
         if "TERMINATE" in decision.upper():
@@ -181,21 +219,23 @@ class GraphReaderAgent:
             if n == target or n in target or target in n:
                 return n, False
 
-        # Action Validation Safeguard: If target is invalid, do not guess arbitrary nodes
-        if unvisited_neighbors:
+        # Action Validation Safeguard: Rank unvisited neighbors by forensic relevance instead of guessing arbitrarily
+        ranked_unvisited = self.rank_candidate_neighbors(current_node, unvisited_neighbors, question)
+        if ranked_unvisited:
+            chosen = ranked_unvisited[0]
             self._log(
-                f"STEP {step}: ACTION VALIDATION WARNING",
-                f"Target '{target}' is not an adjacent node. Diverting to unvisited neighbor '{unvisited_neighbors[0]}'",
+                f"STEP {step}: ACTION VALIDATION ROUTING",
+                f"Target '{target}' is not an adjacent node. Ranked routing to '{chosen}' (tier/relevance priority)",
             )
-            return unvisited_neighbors[0], False
+            return chosen, False
 
         self._log(f"STEP {step}: TERMINATION", "No valid adjacent unvisited neighbors remaining.")
         return None, True
 
     def synthesize_answer(self, question: str) -> str:
         """
-        Step 4: Compiles all recorded notes, performs evidence verification,
-        and reasons the final answer strictly from supported fact IDs.
+        Step 4: Compiles all recorded notes, performs deterministic evidence verification,
+        validates cited fact IDs against immutable notebook facts, and reasons the final answer.
         """
         if self.notebook.is_empty():
             return "INSUFFICIENT EVIDENCE: No relevant clues were gathered during graph traversal."
@@ -203,18 +243,33 @@ class GraphReaderAgent:
         verified_fact_ids = self.notebook.get_all_fact_ids()
         notes = self.notebook.format_for_prompt()
 
-        prompt = (
-            f"You are a DFIR technical investigator answering a question based strictly on gathered evidence.\n\n"
-            f"Target Question: {question}\n\n"
-            f"Recorded Evidence Notebook (Verified Fact IDs: {', '.join(sorted(verified_fact_ids))}):\n{notes}\n\n"
-            f"Instructions:\n"
-            f"1. Check if the gathered evidence contains a definitive, unbroken logical chain connecting the entities in the question.\n"
-            f"2. Cite the exact Fact IDs (e.g. C0_F1) supporting each link in the chain.\n"
-            f"3. If evidence is missing, inconclusive, or unsupported, explicitly state: 'INSUFFICIENT EVIDENCE: [explain missing link]'.\n"
-            f"4. If evidence is sufficient, provide the concise evidence chain with cited Fact IDs and the final direct answer.\n"
-            f"Answer:"
+        sys_prompt, prompt, _ = PromptBudgetManager.assemble_prompt(
+            system_text="You are a DFIR technical investigator answering a question based strictly on gathered evidence.",
+            query_and_plan=f"Target Question: {question}",
+            notebook_text=notes,
+            context_text=f"Verified Immutable Fact IDs available: {', '.join(sorted(verified_fact_ids))}",
+            instructions=(
+                "Instructions:\n"
+                "1. Check if the gathered evidence contains a definitive, unbroken logical chain connecting the entities in the question.\n"
+                "2. Cite the exact Fact IDs (e.g. C0_F1) supporting each link in the chain.\n"
+                "3. If evidence is missing, inconclusive, or unsupported, explicitly state: 'INSUFFICIENT EVIDENCE: [explain missing link]'.\n"
+                "4. If evidence is sufficient, provide the concise evidence chain with cited Fact IDs and the final direct answer.\n"
+                "Answer:"
+            ),
         )
-        answer = self.llm.generate(prompt=prompt, temperature=0.1)
+        answer = self.llm.generate(prompt=prompt, system=sys_prompt, temperature=0.1)
+
+        # Deterministic Evidence Verification Check
+        cited_fact_ids = set(re.findall(r"\b(C\d+_F\d+)\b", answer))
+        invalid_citations = cited_fact_ids - verified_fact_ids
+
+        if invalid_citations:
+            self._log("EVIDENCE VERIFICATION WARNING", f"Answer cited unverified Fact IDs: {invalid_citations}")
+            verification_notice = f"\n\n[FORENSIC AUDIT: Warning - Answer cited unverified fact IDs: {', '.join(invalid_citations)}]"
+            answer += verification_notice
+        elif cited_fact_ids:
+            self._log("EVIDENCE VERIFIED", f"All cited Fact IDs verified against notebook: {cited_fact_ids}")
+
         self._log("FINAL ANSWER", answer)
         return answer
 
@@ -252,8 +307,9 @@ class GraphReaderAgent:
             if next_node in visited_nodes:
                 adjacent = self.kg.get_adjacent_nodes(next_node)
                 unvisited = [n for n in adjacent if n not in visited_nodes]
-                if unvisited:
-                    current_node = unvisited[0]
+                ranked = self.rank_candidate_neighbors(next_node, unvisited, question)
+                if ranked:
+                    current_node = ranked[0]
                 else:
                     self._log("EXPLORATION COMPLETE", "All local neighbors explored.")
                     break

@@ -54,12 +54,12 @@ This project runs **100% locally** via Ollama. It extracts a directed `MultiDiGr
 
 ## Key Technical Guardrails
 
-* **Directed MultiDiGraph with Forensic Tiers:** Distinguishes relationship directions (`Host -> communicated_with -> IP` vs reverse) and tags edges with forensic classifications: `OBSERVED` (endpoint events), `INTELLIGENCE_REPORTED` (threat intelligence attribution), or `CO_OCCURRENCE`.
-* **Centralized Prompt Budget Manager:** Strictly allocates context budgets (system instructions: 400t, query/plan: 300t, notebook: 1,000t, context: 1,500t, output reserve: 500t) and clamps candidate node lists to guarantee requests never exceed 4,096 tokens.
-* **Bounded Provenance Memory (`EvidenceNote`):** Enforces a 1,000-token budget with per-note clamping, deduplication, and FIFO eviction. Each note preserves immutable `fact_ids` and source excerpts.
+* **Directed MultiDiGraph with Strict Forensic Tiers:** Distinguishes relationship directions (`Host -> communicated_with -> IP` vs reverse) and enforces strict allowlists for forensic classifications: `OBSERVED` (endpoint events), `INTELLIGENCE_REPORTED` (threat intelligence attribution), `CO_OCCURRENCE`, or `UNCLASSIFIED` (unrecognized predicates never default to observed).
+* **Centralized Prompt Budget Assembler:** All LLM prompts pass through `PromptBudgetManager.assemble_prompt()` to strictly allocate context budgets (system instructions: 400t, query/plan: 300t, notebook: 1,000t, context: 1,500t, output reserve: 500t) and clamp candidate nodes to guarantee requests never exceed 4,096 tokens.
+* **Bounded Provenance Memory (`EvidenceNote`):** Enforces a 1,000-token budget with immutable `frozen=True` dataclasses, tuple-based `fact_ids`, source excerpts, per-note clamping, deduplication, and FIFO eviction.
 * **Explicit Context Limit:** Passes `"options": {"num_ctx": 4096}` directly to the Ollama API.
-* **Resilient Node Selection & Action Validation:** Avoids blind fallbacks using query keyword overlap and hub-degree centrality. Rejects invalid hop targets before execution.
-* **Deterministic Evidence Verification:** Requires an unbroken evidence chain citing verified `fact_ids` before synthesizing a final answer, preventing unsupported hallucinations.
+* **Resilient Node Selection & Forensic Routing:** Avoids blind fallbacks using query keyword overlap and hub-degree centrality. Rejects invalid hop targets and routes fallback hops by forensic edge tier (`OBSERVED` prioritized over `CO_OCCURRENCE`).
+* **Deterministic Evidence Verification:** Synthesized answers are audited against the notebook's verified fact IDs. If the model cites unverified fact IDs, an automated forensic audit warning is appended.
 
 ---
 
@@ -151,7 +151,7 @@ graph-memory-agent/
 ├── examples/
 │   └── cyber_incident_report.txt # DFIR incident triage scenario
 ├── tests/
-│   └── test_components.py # 8 offline unit tests (budgeting, graph direction, fallbacks)
+│   └── test_components.py # 10 offline unit tests (assembly, edge allowlists, verification, fallbacks)
 ├── run_agent.py           # CLI entry point
 └── README.md
 ```

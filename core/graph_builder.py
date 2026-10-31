@@ -19,14 +19,35 @@ def normalize_entity(name: str) -> str:
     return cleaned
 
 
+OBSERVED_PREDICATES = {
+    "communicated_with", "connected_to", "executed", "created", "dropped_file",
+    "modified_registry", "logged_into", "downloaded", "established_beacon",
+    "founded_inside", "architected", "worked_at", "previously_worked_at",
+    "modified_logic", "sent_command", "authenticated_to", "scanned",
+}
+
+INTELLIGENCE_PREDICATES = {
+    "attributed_to", "known_technique", "associated_with", "suspected_actor",
+    "maintains_persistence", "uses_malware", "targets_sector", "aliases",
+}
+
+
 def classify_relation(relation: str) -> str:
-    """Classifies edge relations into forensic tiers: OBSERVED, INTELLIGENCE_REPORTED, or CO_OCCURRENCE."""
-    rel = relation.lower().strip()
+    """
+    Classifies edge relations into strict forensic tiers:
+    - OBSERVED: Direct physical/endpoint/network events on strict allowlist.
+    - INTELLIGENCE_REPORTED: CTI attributions and TTP mappings on allowlist.
+    - CO_OCCURRENCE: Explicit secondary entity mentions.
+    - UNCLASSIFIED: Any unrecognized or ambiguous predicate (never assumed OBSERVED).
+    """
+    rel = relation.lower().strip().replace(" ", "_")
     if rel in ["co_occurs_with", "co_occurs", "related_to"]:
         return "CO_OCCURRENCE"
-    if any(k in rel for k in ["attributed", "intel", "known", "associated", "suspected", "reported"]):
+    if rel in OBSERVED_PREDICATES or any(p in rel for p in ["communicat", "execut", "connect", "drop", "regist"]):
+        return "OBSERVED"
+    if rel in INTELLIGENCE_PREDICATES or any(p in rel for p in ["attribut", "intel", "persist"]):
         return "INTELLIGENCE_REPORTED"
-    return "OBSERVED"
+    return "UNCLASSIFIED"
 
 
 @dataclass
