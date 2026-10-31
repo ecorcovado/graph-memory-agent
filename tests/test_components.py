@@ -10,7 +10,9 @@ from core.graph_builder import (
     AtomicFact, KnowledgeGraph, normalize_entity, classify_relation,
     classify_relation_forensics, ForensicRelation, GraphBuilder,
     EVIDENCE_BASIS_TELEMETRY, EVIDENCE_BASIS_REPORTED, EVIDENCE_BASIS_INTEL,
+    EVIDENCE_BASIS_UNCLASSIFIED,
 )
+from core.case_loader import CaseLoader, NormalizedEvent, StructuredLogParser
 from core.budget_manager import PromptBudgetManager
 from core.agent import GraphReaderAgent
 
@@ -381,13 +383,92 @@ class TestGraphMemoryAgent(unittest.TestCase):
                 file_path = os.path.join(purdue_dir, rel_file)
                 self.assertTrue(os.path.exists(file_path), f"Evidence source file missing: {file_path}")
 
-        # Verify expected attack path has 7 unbroken steps spanning Level 4 to Level 0
-        attack_path_file = os.path.join(purdue_dir, manifest["ground_truth"]["expected_attack_path"])
+    def test_primary_attack_path_continuity(self):
+        import json
+        import os
+
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        attack_path_file = os.path.join(base_dir, "examples", "purdue_ot_incident", "ground_truth", "expected_attack_path.json")
         with open(attack_path_file, "r", encoding="utf-8") as f:
-            attack_path = json.load(f)
-        self.assertEqual(len(attack_path["ordered_path"]), 7)
-        self.assertEqual(attack_path["ordered_path"][0]["purdue_level"], 4)
-        self.assertEqual(attack_path["ordered_path"][-1]["purdue_level"], 0)
+            data = json.load(f)
+
+        primary_path = data["primary_attack_path"]
+        self.assertGreaterEqual(len(primary_path), 4)
+
+        # Strict mathematical continuity: target of step N must be source of step N+1
+        for current, following in zip(primary_path, primary_path[1:]):
+            self.assertEqual(
+                current["target_node"],
+                following["source_node"],
+                f"Path discontinuity: {current['target_node']} does not connect to {following['source_node']}",
+            )
+
+    def test_classify_relation_forensics_strict_allowlist_and_fallbacks(self):
+        # 1. Unknown source type must fail closed to UNCLASSIFIED
+        tier_unk, basis_unk = classify_relation_forensics("executed", source_type="UNKNOWN_IMPORT")
+        self.assertEqual(tier_unk, "UNCLASSIFIED")
+        self.assertEqual(basis_unk, EVIDENCE_BASIS_UNCLASSIFIED)
+
+        # 2. Invalid explicit evidence basis must fail closed to UNCLASSIFIED
+        tier_inv, basis_inv = classify_relation_forensics("communicated_with", evidence_basis="INVALID_BASIS")
+        self.assertEqual(tier_inv, "UNCLASSIFIED")
+        self.assertEqual(basis_inv, EVIDENCE_BASIS_UNCLASSIFIED)
+
+        # 3. Known trusted telemetry source yields DIRECT_TELEMETRY
+        tier_tel, basis_tel = classify_relation_forensics("executed", source_type="SYSMON_EVENT")
+        self.assertEqual(tier_tel, "OBSERVED")
+        self.assertEqual(basis_tel, EVIDENCE_BASIS_TELEMETRY)
+
+    def test_case_loader_deterministic_ingestion(self):
+        import os
+
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        # Check nodes across Purdue levels
+        for expected_node in ["corp-ws-019", "dmz-hist-mirror", "scada-ignition-gw01", "eng-ws-02", "plc-ballast-01"]:
+            self.assertTrue(kg.graph.has_node(expected_node), f"Missing expected node: {expected_node}")
+
+        # Check critical PLC logic modification edge
+        edge_data = kg.graph.get_edge_data("eng-ws-02", "plc-ballast-01")
+        self.assertIsNotNone(edge_data)
+        first_edge = list(edge_data.values())[0]
+        self.assertEqual(first_edge["relation"], "modified_logic")
+        self.assertEqual(first_edge["classification"], "OBSERVED")
+        self.assertEqual(first_edge["evidence_basis"], EVIDENCE_BASIS_TELEMETRY)
+
+        # Check atomic facts have genuine record IDs and source locations
+        for fact in kg.atomic_facts.values():
+            self.assertTrue(len(fact.source_record_id) > 0)
+            self.assertTrue(len(fact.source_location) > 0)
+            self.assertIn(":", fact.source_location)
+
+    def test_missing_controller_audit_fail_closed(self):
+        import os
+
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+
+        # Ingest case with controller_audit.jsonl excluded
+        kg_missing = loader.load_case(exclude_sources=["controller_audit.jsonl"])
+
+        # eng-ws-02 must NOT have an edge to plc-ballast-01
+        has_plc_edge = kg_missing.graph.has_edge("eng-ws-02", "plc-ballast-01")
+        self.assertFalse(has_plc_edge, "eng-ws-02 unexpectedly connected to plc-ballast-01 when audit is excluded")
+
+        # Mock agent synthesis: must fail closed when questioned on PLC compromise
+        client = MockOllamaClient(responses={
+            "Target Question": "The available evidence establishes access to the historian mirror and subsequent SCADA activity. However, there is no controller audit record proving that the PLC logic was modified by the same session. The attack path is therefore incomplete."
+        })
+        agent = GraphReaderAgent(client, kg_missing)
+        agent.notebook.add_note(step=1, source_node="dmz-hist-mirror", content="Accessed SCADA gateway", fact_ids=["dummy_F001"])
+
+        answer = agent.synthesize_answer("Did the enterprise compromise reach the PLC?")
+        # Without fact citations proving PLC modification, verification fails closed or returns incomplete
+        self.assertIn("INSUFFICIENT EVIDENCE", answer)
 
 
 if __name__ == "__main__":

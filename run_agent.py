@@ -1,6 +1,7 @@
 """
 CLI Runner for Graph Memory Agent
 Demonstrates multi-hop graph exploration using local Ollama (qwen2.5-coder:7b).
+Supports both unstructured document ingestion (--file) and deterministic structured case bundles (--case).
 """
 
 import os
@@ -8,6 +9,7 @@ import sys
 import argparse
 from core.graph_builder import LocalOllamaClient, GraphBuilder
 from core.agent import GraphReaderAgent
+from core.case_loader import CaseLoader
 
 
 DEFAULT_DEMO_TEXT = """
@@ -24,7 +26,8 @@ DEFAULT_QUESTION = "In which historic building was the lab founded where the lea
 def main():
     parser = argparse.ArgumentParser(description="Graph Memory Agent - Local Multi-Hop LLM Reasoning")
     parser.add_argument("--model", type=str, default="qwen2.5-coder:7b", help="Ollama model name (default: qwen2.5-coder:7b)")
-    parser.add_argument("--file", type=str, default=None, help="Path to custom text file or incident directory")
+    parser.add_argument("--file", type=str, default=None, help="Path to custom text file or incident narrative")
+    parser.add_argument("--case", type=str, default=None, help="Path to structured case bundle directory (e.g. examples/purdue_ot_incident)")
     parser.add_argument("--question", type=str, default=DEFAULT_QUESTION, help="Target multi-hop question")
     args = parser.parse_args()
 
@@ -33,30 +36,44 @@ def main():
     print(f"  Target Model: {args.model} (100% Local via Ollama)")
     print("=" * 70)
 
-    # Determine input text
-    if args.file:
+    client = LocalOllamaClient(model=args.model)
+
+    # 1. Deterministic Case Bundle Ingestion (v0.4 Pipeline)
+    if args.case:
+        try:
+            print(f"[*] Ingesting structured case bundle from: {args.case}")
+            loader = CaseLoader(args.case)
+            print("\n[Phase 1] Ingesting Structured Case Bundle...")
+            kg = loader.load_case()
+        except Exception as e:
+            print(f"[!] Error loading case '{args.case}': {e}")
+            sys.exit(1)
+
+    # 2. Unstructured Document Ingestion
+    elif args.file:
         try:
             target_path = args.file
             if os.path.isdir(target_path):
                 overview_path = os.path.join(target_path, "incident_overview.txt")
                 if os.path.exists(overview_path):
                     target_path = overview_path
-                    print(f"[*] Case directory provided. Loaded: {target_path}")
+                    print(f"[*] Case directory provided. Loaded narrative: {target_path}")
             with open(target_path, "r", encoding="utf-8") as f:
                 target_text = f.read()
             print(f"[*] Loaded document from: {target_path} ({len(target_text)} chars)")
+            builder = GraphBuilder(client)
+            print("\n[Phase 1] Building Knowledge Graph from text...")
+            kg = builder.build_graph(target_text)
         except Exception as e:
             print(f"[!] Error reading file '{args.file}': {e}")
             sys.exit(1)
+
+    # 3. Default Demo Benchmark
     else:
-        print("[*] No --file specified. Using built-in Project Aegis benchmark.")
-        target_text = DEFAULT_DEMO_TEXT
-
-    client = LocalOllamaClient(model=args.model)
-    builder = GraphBuilder(client)
-
-    print("\n[Phase 1] Building Knowledge Graph from text...")
-    kg = builder.build_graph(target_text)
+        print("[*] No --case or --file specified. Using built-in Project Aegis benchmark.")
+        builder = GraphBuilder(client)
+        print("\n[Phase 1] Building Knowledge Graph from benchmark text...")
+        kg = builder.build_graph(DEFAULT_DEMO_TEXT)
 
     print("\n[Phase 2] Initializing GraphReader Agent...")
     agent = GraphReaderAgent(client, kg, max_steps=6, verbose=True)

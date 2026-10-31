@@ -8,7 +8,7 @@ import json
 import re
 from typing import List, Optional, Set, Tuple
 from core.graph_builder import KnowledgeGraph, LocalOllamaClient
-from core.notebook import Notebook
+from core.notebook import Notebook, SourceReference
 from core.budget_manager import PromptBudgetManager
 
 
@@ -174,16 +174,24 @@ class GraphReaderAgent:
 
         is_none = new_clues.upper().strip() in ["NONE", "NONE.", "'NONE'", '"NONE"']
         if new_clues and not is_none:
-            primary_source_id = facts[0].source_id if facts and facts[0].source_id else "src_doc"
+            source_refs = []
+            for f in facts:
+                source_refs.append(
+                    SourceReference(
+                        source_id=f.source_id or "src_doc",
+                        source_record_id=f.source_record_id or current_node,
+                        fact_ids=(f.fact_id,),
+                        excerpt=f.text,
+                        source_location=f.source_location or f"Node:{current_node}",
+                    )
+                )
             self.notebook.add_note(
                 step=step,
                 source_node=current_node,
                 content=new_clues,
                 fact_ids=fact_ids,
                 source_excerpt=source_excerpt,
-                source_id=primary_source_id,
-                source_record_id=current_node,
-                source_location=f"Node:{current_node}",
+                source_refs=source_refs if source_refs else None,
             )
             self._log(f"STEP {step}: NOTEBOOK UPDATED", f"[{current_node}] ->\n{new_clues}")
         else:

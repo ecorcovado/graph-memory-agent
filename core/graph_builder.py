@@ -42,6 +42,20 @@ EVIDENCE_BASIS_INFERRED = "INFERRED"
 EVIDENCE_BASIS_CO_OCCURRENCE = "CO_OCCURRENCE"
 EVIDENCE_BASIS_UNCLASSIFIED = "UNCLASSIFIED"
 
+VALID_EVIDENCE_BASES = {
+    EVIDENCE_BASIS_TELEMETRY,
+    EVIDENCE_BASIS_REPORTED,
+    EVIDENCE_BASIS_INTEL,
+    EVIDENCE_BASIS_INFERRED,
+    EVIDENCE_BASIS_CO_OCCURRENCE,
+    EVIDENCE_BASIS_UNCLASSIFIED,
+}
+
+TRUSTED_TELEMETRY_SOURCES = {
+    "SYSMON_EVENT", "WINDOWS_SECURITY", "FIREWALL_LOG",
+    "SCADA_AUDIT", "CONTROLLER_AUDIT", "PROCESS_TELEMETRY", "ZEEK_FLOW"
+}
+
 
 def classify_relation(relation: str) -> str:
     """
@@ -68,26 +82,35 @@ def classify_relation_forensics(
 ) -> Tuple[str, str]:
     """
     Separates predicate semantics (what happened) from evidence basis (how it is known).
+    Strictly validates both source_type and explicit evidence_basis.
+    Unknown or unverified source types strictly fail closed to UNCLASSIFIED.
     Returns (classification_tier, evidence_basis).
-    - Tier: OBSERVED, INTELLIGENCE_REPORTED, CO_OCCURRENCE, UNCLASSIFIED
-    - Evidence Basis: DIRECT_TELEMETRY, ANALYST_REPORTED, THREAT_INTELLIGENCE, CO_OCCURRENCE, UNCLASSIFIED
     """
     tier = classify_relation(relation)
+
+    # 1. Validate explicit evidence basis if provided
     if evidence_basis:
-        basis = evidence_basis
+        if evidence_basis in VALID_EVIDENCE_BASES:
+            basis = evidence_basis
+        else:
+            basis = EVIDENCE_BASIS_UNCLASSIFIED
+            tier = "UNCLASSIFIED"
     elif tier == "CO_OCCURRENCE":
         basis = EVIDENCE_BASIS_CO_OCCURRENCE
-    elif source_type in [
-        "SYSMON_EVENT", "WINDOWS_SECURITY", "FIREWALL_LOG",
-        "SCADA_AUDIT", "CONTROLLER_AUDIT", "PROCESS_TELEMETRY", "ZEEK_FLOW"
-    ]:
+    elif source_type in TRUSTED_TELEMETRY_SOURCES:
         basis = EVIDENCE_BASIS_TELEMETRY if tier == "OBSERVED" else EVIDENCE_BASIS_REPORTED
-    elif tier == "INTELLIGENCE_REPORTED":
+    elif source_type == "INCIDENT_REPORT":
+        basis = EVIDENCE_BASIS_REPORTED if tier == "OBSERVED" else (
+            EVIDENCE_BASIS_INTEL if tier == "INTELLIGENCE_REPORTED" else EVIDENCE_BASIS_UNCLASSIFIED
+        )
+    elif source_type == "THREAT_INTELLIGENCE":
         basis = EVIDENCE_BASIS_INTEL
-    elif tier == "OBSERVED":
-        basis = EVIDENCE_BASIS_REPORTED if source_type == "INCIDENT_REPORT" else EVIDENCE_BASIS_TELEMETRY
+    elif source_type == "INFERRED":
+        basis = EVIDENCE_BASIS_INFERRED
     else:
+        # Strict fail-closed: Unknown source types (e.g. UNKNOWN_IMPORT) strictly default to UNCLASSIFIED
         basis = EVIDENCE_BASIS_UNCLASSIFIED
+        tier = "UNCLASSIFIED"
 
     return tier, basis
 
@@ -134,6 +157,9 @@ class AtomicFact:
     chunk_id: int
     text: str
     source_id: str = ""
+    source_record_id: str = ""
+    source_location: str = ""
+    event_time: str = ""
     subject: str = ""
     relation: str = "related_to"
     object_entity: str = ""

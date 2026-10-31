@@ -86,10 +86,13 @@ python run_agent.py --model qwen2.5-coder:7b
 # 2. Run against the DFIR incident report
 python run_agent.py --file examples/cyber_incident_report.txt --question "What persistence scheduled task is associated with the threat group communicating with WORKSTATION-402?"
 
-# 3. Run against Project Aegis (OT/ICS Purdue Reference Incident)
+# 3. Run against Project Aegis (Deterministic Structured Case Ingestion)
+python run_agent.py --case examples/purdue_ot_incident --question "Did the enterprise compromise reach the PLC?"
+
+# 4. Run against Project Aegis (Unstructured Incident Narrative)
 python run_agent.py --file examples/purdue_ot_incident/incident_overview.txt --question "Which PLC was modified and what safety interlock was bypassed following the enterprise compromise?"
 
-# 4. Run offline unit tests (20 passing tests)
+# 5. Run offline unit tests (24 passing tests)
 python -m unittest tests/test_components.py
 ```
 
@@ -147,6 +150,7 @@ The persistence scheduled task associated with the threat group communicating wi
 ```
 graph-memory-agent/
 ├── core/
+│   ├── case_loader.py     # Deterministic structured log ingestion (Sysmon, FW, SCADA, CIP)
 │   ├── budget_manager.py  # Prompt budget manager (4K token context bounds)
 │   ├── graph_builder.py   # Document SHA-256 hashes, typed triples, and NetworkX MultiDiGraph
 │   ├── notebook.py        # Linked SourceReference memory with provenance-preserving merging
@@ -164,8 +168,8 @@ graph-memory-agent/
 │       ├── level0_process/        # Level 0 Sensor telemetry & safety valve trip events
 │       └── ground_truth/          # Benchmark expected paths, atomic facts, and fail-closed answers
 ├── tests/
-│   └── test_components.py # 20 offline unit tests (fail-closed auditing, SourceReference linking, full-line parsing)
-├── run_agent.py           # CLI entry point
+│   └── test_components.py # 24 offline unit tests (fail-closed auditing, path continuity, structured ingestion)
+├── run_agent.py           # CLI entry point (supports --file and --case)
 └── README.md
 ```
 
@@ -180,7 +184,8 @@ graph-memory-agent/
 * [x] Document-level SHA-256 source identity and zero-padded fact IDs
 * [x] Linked `SourceReference` immutable memory structures
 * [x] Architectural separation of predicates from evidence bases (`DIRECT_TELEMETRY` vs `ANALYST_REPORTED`)
-* [ ] **Structured Log Parsers:** Automated ingestion for Sysmon JSON, Windows Event Logs (EVTX), and Zeek conn logs.
+* [x] **v0.4 Deterministic Structured Ingestion:** `CaseLoader` and `StructuredLogParser` directly compiling Sysmon, Windows Security, Firewall, SCADA audit, and CIP controller logs into the graph with zero extraction latency
+* [x] **Mathematical Path Continuity & Fail-Closed Benchmarks:** Automated tests asserting strict edge continuity and fail-closed termination when controller audit evidence is missing
 * [ ] **Automated ATT&CK Mapping:** Direct lookup mapping of observed edges to MITRE ATT&CK for ICS v20.0 technique IDs.
 
 ---
