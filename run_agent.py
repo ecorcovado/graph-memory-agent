@@ -10,6 +10,7 @@ import argparse
 from core.graph_builder import LocalOllamaClient, GraphBuilder
 from core.agent import GraphReaderAgent
 from core.case_loader import CaseLoader
+from core.reporter import InvestigationReporter
 
 
 DEFAULT_DEMO_TEXT = """
@@ -29,6 +30,7 @@ def main():
     parser.add_argument("--file", type=str, default=None, help="Path to custom text file or incident narrative")
     parser.add_argument("--case", type=str, default=None, help="Path to structured case bundle directory (e.g. examples/purdue_ot_incident)")
     parser.add_argument("--question", type=str, default=DEFAULT_QUESTION, help="Target multi-hop question")
+    parser.add_argument("--report", type=str, default=None, help="Generate standalone interactive HTML forensic report (e.g. reports/investigation.html)")
     args = parser.parse_args()
 
     print("=" * 70)
@@ -97,6 +99,13 @@ def main():
     print(f"Question: {args.question}")
     print(f"Answer:   {answer}")
     print("=" * 70)
+
+    # 4. Generate Visual Terminal Dashboard & Interactive Forensic Report
+    if args.case or args.report:
+        reporter = InvestigationReporter(kg, agent.notebook, answer, args.question)
+        reporter.print_terminal_dashboard()
+        report_path = args.report or "reports/investigation_report.html"
+        reporter.generate_html_report(report_path)
 
 
 if __name__ == "__main__":

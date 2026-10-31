@@ -898,6 +898,60 @@ class TestGraphMemoryAgent(unittest.TestCase):
         )
         self.assertEqual(events_inv[0].event_time, "INVALID_TIMESTAMP")
 
+    def test_investigation_reporter_html_and_dashboard_generation(self):
+        import tempfile, shutil
+        from core.reporter import InvestigationReporter
+
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        notebook = Notebook()
+        cip_facts = [f for f in kg.atomic_facts.values() if f.relation == "modified_logic"]
+        self.assertTrue(len(cip_facts) > 0)
+        notebook.add_note(step=1, source_node="eng-ws-02", content="Modified PLC logic", fact_ids=[cip_facts[0].fact_id])
+
+        reporter = InvestigationReporter(
+            kg=kg,
+            notebook=notebook,
+            answer="The compromise reached the PLC.",
+            question="Did the enterprise compromise reach the PLC?"
+        )
+
+        stages = reporter.analyze_stages()
+        self.assertIn("Level 1: Process Control", stages)
+        self.assertEqual(stages["Level 1: Process Control"]["status"], "SUPPORTED")
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            report_file = os.path.join(temp_dir, "test_report.html")
+            out_path = reporter.generate_html_report(report_file)
+            self.assertTrue(os.path.exists(out_path))
+            with open(out_path, "r", encoding="utf-8") as f:
+                html = f.read()
+            self.assertIn("Project Aegis Incident Investigation Report", html)
+            self.assertIn("Level 1: Process Control", html)
+            self.assertIn("100% AUDITED", html)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_comparative_benchmark_suite_execution(self):
+        import benchmark
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+
+        res_kw = benchmark.benchmark_keyword_search(case_dir)
+        self.assertEqual(res_kw["path_continuity"], "0% (Disconnected)")
+
+        res_rag = benchmark.benchmark_vector_rag(case_dir)
+        self.assertIn("Broken", res_rag["path_continuity"])
+
+        res_agent = benchmark.benchmark_graph_memory_agent(case_dir)
+        self.assertEqual(res_agent["path_continuity"], "100% (Unbroken Purdue Chain)")
+        self.assertEqual(res_agent["provenance_accuracy"], "100% (Cryptographic Hashes)")
+        self.assertEqual(res_agent["hallucination_rate"], "0.0% (Strict Allowlist Enforcement)")
+
 
 if __name__ == "__main__":
     unittest.main()
