@@ -404,6 +404,24 @@ class GraphReaderAgent:
                 present_predicates = {f.relation for f in notebook_facts if f}
                 missing_predicates = requirements.required_predicates - present_predicates
                 if missing_predicates:
+                    # Forensic Distinction: Check for positive evidence that the intrusion was actively blocked
+                    blocked_facts = [
+                        f for f in notebook_facts
+                        if f and (
+                            f.relation in ["blocked_connection_to", "connection_denied", "access_denied", "process_terminated"]
+                            or f.attributes.get("action") in ["BLOCK", "DENY"]
+                            or "block" in str(f.attributes.get("rule_id", "")).lower()
+                        )
+                    ]
+                    if blocked_facts:
+                        bf = blocked_facts[0]
+                        self._log("DEFENSE EVIDENCE ENFORCED", f"Adversary path actively blocked: {bf.text}")
+                        return (
+                            f"REFUTED: Positive telemetry verifies adversary lateral movement was blocked "
+                            f"({bf.subject} {bf.relation} {bf.object_entity} [{bf.fact_id}]). "
+                            f"Adversary did not compromise target controller or process assets."
+                        )
+
                     self._log("EVIDENCE POLICY ENFORCED", f"Missing required predicate(s): {missing_predicates}")
                     return (
                         f"INSUFFICIENT EVIDENCE: Gathered evidence lacks required predicate(s) "
@@ -432,7 +450,8 @@ class GraphReaderAgent:
                 "1. Check if the gathered evidence contains a definitive, unbroken logical chain connecting the entities in the question.\n"
                 "2. Cite the exact Fact IDs supporting each link in the chain (choose strictly from the Verified Immutable Fact IDs listed above).\n"
                 "3. If evidence is missing, inconclusive, or unsupported, explicitly state: 'INSUFFICIENT EVIDENCE: [explain missing link]'.\n"
-                "4. If evidence is sufficient, provide the concise evidence chain with cited Fact IDs and the final direct answer.\n"
+                "4. If telemetry proves the attack path was actively blocked or halted by security controls, state: 'REFUTED: [explain defense blockage]'.\n"
+                "5. If evidence is sufficient and unbroken, provide the concise evidence chain with cited Fact IDs and the final direct answer.\n"
                 "Answer:"
             ),
         )
@@ -483,7 +502,7 @@ class GraphReaderAgent:
                 f"The generated answer cited unverified fact IDs: {', '.join(sorted(invalid_citations))}"
             )
 
-        if not cited_fact_ids and "insufficient evidence" not in answer.lower():
+        if not cited_fact_ids and "insufficient evidence" not in answer.lower() and "refuted" not in answer.lower():
             self._log("EVIDENCE VERIFICATION FAILED", "Answer contained no citations to verified atomic facts.")
             return (
                 "INSUFFICIENT EVIDENCE: The generated answer failed forensic validation because it contained "
@@ -529,7 +548,7 @@ class GraphReaderAgent:
 
         # B. Plaintext Claim Validation (prevents verification bypass on unstructured text)
         ans_lower = answer.lower()
-        if "insufficient evidence" not in ans_lower:
+        if "insufficient evidence" not in ans_lower and "refuted" not in ans_lower:
             # If answer asserts PLC modification or download
             if ("plc" in ans_lower or "controller" in ans_lower) and any(w in ans_lower for w in ["modif", "download", "logic"]):
                 if not expected_target_ctrl:

@@ -10,11 +10,11 @@ Built from core concepts in the *GraphReader* paper ([arXiv:2406.14550](https://
 
 ## Why this exists
 
-### 1. Vector RAG fails at multi-hop links
-Vector search (cosine similarity on text embeddings) works when the answer is in one chunk. It breaks down when answering multi-stage questions like:
+### 1. Flat chunk retrieval fails at multi-hop links
+Flat retrieval (lexical TF-IDF or text embeddings) works when the answer is in one chunk. It breaks down when answering multi-stage questions like:
 > *"Did the enterprise compromise reach the PLC, and what safety interlock was bypassed?"*
 
-The enterprise endpoint log on `CORP-WS-019` mentions an IP, the DMZ firewall log links that IP to an internal mirror, the SCADA audit log connects the mirror to an engineering workstation, and the controller audit log proves the CIP program download. An embedding search for "PLC bypass" retrieves the controller log and leaps over intermediate network conduits, hallucinating a direct connection.
+The enterprise endpoint log on `CORP-WS-019` mentions an IP, the DMZ firewall log links that IP to an internal mirror, the SCADA audit log connects the mirror to an engineering workstation, and the controller audit log proves the CIP program download. A flat search for "PLC bypass" retrieves the controller log and leaps over intermediate network conduits, hallucinating a direct connection.
 
 ### 2. Massive context windows degrade and leak confidential data
 Dumping 50,000 lines of SIEM logs into a 128k context window triggers "lost-in-the-middle" attention degradation. More importantly, in security operations (SOC/DFIR), you cannot leak client network logs, internal IPs, or industrial control logic to third-party cloud APIs.
@@ -25,7 +25,7 @@ This project runs **100% locally** via Ollama. It compiles structured log record
 
 ## Modular Deterministic Ingestion Architecture
 
-GraphMemory Agent implements a 9-stage, fail-closed forensic ingestion pipeline that compiles structured log records directly into verified graph facts without ungrounded fact generation:
+GraphMemory Agent implements a 10-stage, fail-closed forensic ingestion and investigation pipeline that compiles structured log records directly into verified graph facts without ungrounded fact generation:
 
 ```
                   ┌────────────────────────┐
@@ -55,7 +55,7 @@ GraphMemory Agent implements a 9-stage, fail-closed forensic ingestion pipeline 
              ▼                                 ▼
    ┌───────────────────┐             ┌───────────────────┐
    │  Sysmon Adapter   │             │   Zeek Adapter    │
-   │(EID 1, 3, 11, 22) │             │ (conn, dns, alert)│
+   │ (EID 1-3, 11-14)  │             │ (conn, dns, alert)│
    └─────────┬─────────┘             └─────────┬─────────┘
              │                                 │
              └────────────────┬────────────────┘
@@ -93,7 +93,7 @@ GraphMemory Agent implements a 9-stage, fail-closed forensic ingestion pipeline 
 
 1. **Case Manifest:** Resolves case metadata, Purdue zones, and ground truth specifications.
 2. **Case Loader:** Canonical path resolution (`os.path.realpath`) defending against path traversal attacks.
-3. **Source SHA-256 and Record Identity:** Single byte snapshot hashing (`full_sha`) generating deterministic record identifiers (`{source_type}_{line_idx:04d}`).
+3. **Source Ingestion Integrity & Tamper Detection:** Single byte snapshot hashing (`full_sha`) generating deterministic record identifiers (`{source_type}_{line_idx:04d}`). Guarantees post-acquisition file integrity, verifying that evidence files have not been modified since acquisition on disk.
 4. **Format Detection (`FormatDetector`):** Detects schema types (Sysmon, Zeek, Windows Security, CIP Controller, Historian, Physical Telemetry).
 5. **Specialized Adapters (`core/adapters/`):**
    - `SysmonAdapter`: Process creation (EID 1), Network connection (EID 3), File creation (EID 11), Registry (EID 12-14), DNS query (EID 22).
@@ -110,6 +110,10 @@ GraphMemory Agent implements a 9-stage, fail-closed forensic ingestion pipeline 
 
 ## Key Technical Guardrails
 
+* **Three-Verdict Forensic Framework (SUPPORTED / REFUTED / INSUFFICIENT):** Distinctly separates positive defense verification from missing telemetry:
+  * `SUPPORTED`: An unbroken conduit chain connects the enterprise breach to target OT assets, validated by record-level citations.
+  * `REFUTED`: Positive security telemetry (e.g. firewall rule `action: BLOCK` / `blocked_connection_to`) verifies that lateral movement was actively blocked by boundary controls before reaching industrial assets.
+  * `INSUFFICIENT EVIDENCE`: Critical telemetry sources are missing from case ingestion or conduits contain unmonitored gaps without positive proof of blockage.
 * **String-Aware & Escape-Aware JSON Scanner:** Balanced-brace scanner (`extract_json_objects`) tracking string boundaries and backslash escapes, reliably extracting structured answers even with embedded braces or escaped quotes in conversational prose.
 * **Plaintext & Structured Claim Validation:** Both JSON and plaintext answers are validated against gathered evidence. Claims asserting PLC logic modification strictly require predicate `modified_logic` from `CONTROLLER_AUDIT` on the target controller specified in the query or case manifest (e.g. `plc-ballast-01`); assertions of safety interlock suppression require physical interlock telemetry on the target actuator (e.g. `xv-4012`). Expected controller and actuator are dynamically bound with **zero hardcoded fallback**; if unspecified in both the query and case manifest, assertions of controller modification immediately fail closed (`INSUFFICIENT EVIDENCE`).
 * **XSS-Hardened Forensic HTML Reports:** All dynamic text (queries, model responses, raw record excerpts) is sanitized with `html.escape()`. Ingestion completeness (`COMPLETE` / `DEGRADED`) is audited separately from source byte hashes and attack path continuity.
@@ -155,52 +159,68 @@ python -m unittest tests/test_components.py
 
 ## Comparative Investigation Benchmark (Project Aegis)
 
-> **Evaluation Scope & Methodology:** Evaluated on the Project Aegis synthetic OT intrusion case study (demonstrating multi-stage network conduit reconstruction across air-gapped Purdue zones). Metrics are calculated dynamically from actual retrieved chunks, edge traversals, and answer citations against ground truth transitions (`examples/purdue_ot_incident/ground_truth/expected_attack_path.json`):
+> **Evaluation Scope & Methodology:** Evaluated on the Project Aegis synthetic OT intrusion testbed (demonstrating multi-stage network conduit reconstruction across air-gapped Purdue zones). Metrics are calculated dynamically on each execution directly from retrieved chunks, edge traversals, and cited atomic facts against ground-truth transitions (`examples/purdue_ot_incident/ground_truth/expected_attack_path.json`):
 
 ### Part 1: Positive Intrusion Scenario (Multi-Stage Purdue Compromise)
 
 Target Query:
 > *"Did the enterprise compromise reach the PLC, and what safety interlock was bypassed?"*
 
-| Methodology | Attack Path Continuity | Citation Provenance | Hallucination Rate | Degraded Evidence Policy |
+| Methodology | Purdue Conduit Continuity | Source Provenance | Conduit Recall / Gap | Policy Enforcement |
 | :--- | :--- | :--- | :--- | :--- |
-| **Keyword Search (Grep/BM25)** | 0% (Disconnected) | 0.0% | N/A (No Synthesis) | NO (Cannot detect gaps) |
-| **TF-IDF Top-k Retrieval** | 25.0% (Broken at DMZ - 1/4 edges) | 0.0% (No Cryptographic Verification) | 75.0% (Missing Intermediate Conduits) | NO (Speculates) |
-| **Unconstrained Graph (NetworkX)** | 100.0% (4/4 edges) | 0.0% (Topology Only, No Hash Audit) | 0.0% (Graph Topology Validated) | NO (No policy enforcement) |
-| **GraphMemory Agent (Ours)** | **100% (Unbroken Purdue Chain)** | **100.0% (Cryptographic Hashes)** | **0.0% (Strict Allowlist Enforcement)** | **YES (Degraded Policy Enforced)** |
+| **Keyword Search (Grep/BM25)** | 0% (Disconnected) | N/A (No Provenance Tracking) | 0.0% (4/4 edges missing) | NO (Cannot detect gaps) |
+| **TF-IDF Top-k Retrieval** | 25.0% (Broken at DMZ - 1/4 edges) | N/A (No Provenance Tracking) | 25.0% (3/4 edges missing) | NO (Speculates without verification) |
+| **Unconstrained Graph (NetworkX)** | 100.0% (4/4 edges) | N/A (Topology Only, No Hashes) | 100.0% (Topology Overmatch) | NO (No policy enforcement) |
+| **GraphMemory Agent (Ours)** | **100% (Unbroken Chain - 4/4 edges)** | **100.0% (Cryptographic Hashes)** | **100.0% (4/4 edges verified)** | **PASS (3-Verdict Enforced)** |
 
-> **Benchmark Metric Evolution & Reproducibility Note:**
-> In early prototype drafts (v0.5.0–v0.5.1), benchmark tables displayed static approximations (e.g. 50% for TF-IDF and 25% for unconstrained graph). Since v0.5.3, all figures are computed dynamically on each run directly by `benchmark.py`:
-> * **TF-IDF Hallucination (75.0%):** Evaluated against the 4 ground-truth transitions. Top-k similarity matches 1 edge (`eng-ws-02` $\rightarrow$ `plc-ballast-01` due to keyword matches), but completely misses 3 intermediate conduits (`corp-ws-019` $\rightarrow$ `dmz`, `dmz` $\rightarrow$ `scada`, and `plc` $\rightarrow$ `xv-4012`). The unverified assertion rate reflects $(3/4) \times 100\% = 75.0\%$ missing conduits.
-> * **Unconstrained Graph (0.0% Hallucination on Positive Case):** Because all 4 topological transitions exist in the ingested graph, NetworkX pathfinding traverses 4/4 edges (0% unverified). However, graph topology alone carries 0.0% cryptographic provenance and completely lacks fail-closed missing evidence detection.
+> **Benchmark Metric Calculation Details:**
+> * **TF-IDF Conduit Recall (25.0%):** Evaluated against the 4 ground-truth transitions. Top-k similarity matches 1 edge (`eng-ws-02` $\rightarrow$ `plc-ballast-01` due to keyword overlap with "PLC"), but misses 3 intermediate conduits (`corp-ws-019` $\rightarrow$ `dmz`, `dmz` $\rightarrow$ `scada`, and `plc` $\rightarrow$ `xv-4012`). The conduit gap rate is $75.0\%$ (3 of 4 edges missing), which causes flat retrieval to leap over the DMZ.
+> * **Unconstrained Graph (100.0% Continuity / 0.0% Provenance):** Because all 4 topological transitions exist in the ingested graph, NetworkX pathfinding finds $4/4$ edges ($100\%$ topological recall). However, topology alone carries $0.0\%$ cryptographic provenance and completely lacks fail-closed missing evidence detection.
 
 ### Part 2: Negative Control Ablation (Intrusion Halted at Level 3.5 DMZ)
 
 A critical failure mode in OT incident triage is *analyst and LLM confirmation bias*—falsely asserting that an intrusion reached Level 1 PLCs simply because industrial terms appear in the query or background process telemetry.
 
-To measure this, `benchmark.py` evaluates a dedicated negative scenario (`examples/purdue_ot_incident_halted_dmz`) where the adversary breaches Level 4 and reaches the DMZ Historian Mirror, but egress into Level 2 SCADA is blocked by firewall rule `PERA-RULE-L35-TO-L2-BLOCK`. Normal background operations continue at Level 1/0 (routine CIP reads, valve interlocks remain `ARMED_AND_ACTIVE`).
+To measure this, `benchmark.py` evaluates a dedicated negative scenario (`examples/purdue_ot_incident_halted_dmz`) where the adversary breaches Level 4 and reaches the DMZ Historian Mirror, but egress into Level 2 SCADA is blocked by firewall rule `PERA-RULE-L35-TO-L2-BLOCK` (`action: BLOCK`). Normal background operations continue at Level 1/0 (routine CIP reads, valve interlocks remain `ARMED_AND_ACTIVE`).
 
 Target Query:
 > *"Did the enterprise compromise reach the PLC, and what safety interlock was bypassed?"*
 
 | Evaluation Metric | Keyword Search | TF-IDF Top-k Retrieval | Unconstrained Graph | GraphMemory Agent (Ours) |
 | :--- | :--- | :--- | :--- | :--- |
-| **Path Continuity** | 0.0% (Disconnected) | 0.0% (No Bridge) | 100.0% (Topology Overmatch) | **25.0% (Halted at Level 3.5)** |
+| **Purdue Continuity** | 0.0% (Disconnected) | 0.0% (No Bridge) | 100.0% (Topology Overmatch) | **25.0% (Halted at Level 3.5)** |
 | **Conduit Integrity** | Broken | Broken | Undetected | **VERIFIED HALT AT DMZ** |
-| **Deterministic Refusal** | NO | NO (Hallucinates connection) | NO (Traverses normal paths) | **YES (100.0% Fail-Closed)** |
-| **False Positive Rate** | N/A (No synthesis) | High (Synthesizes compromise) | High (Affirms operational link) | **0.0% (Zero Hallucination)** |
-| **Final Investigation Verdict** | Disconnected | False Affirmation | False Affirmation | **INSUFFICIENT EVIDENCE** |
+| **Forensic Verdict** | Disconnected | False Affirmation | False Affirmation | **REFUTED (Positive Defense Block)** |
+| **Refutation Rate** | N/A (No synthesis) | 0/1 (Speculates) | 0/1 (Traverses) | **1/1 (100.0% Fail-Closed)** |
+| **False Positive Breach Claims** | N/A | High (Synthesizes compromise) | High (Affirms operational link) | **0/1 (0.0% Zero Hallucination)** |
 
-### Ablation Summary: Why is GraphMemory Agent necessary?
+### Part 3: LLM vs Deterministic Rule-Stub Ablation (Isolating Model Contribution)
 
-* **Graph Topology Alone (NetworkX):** Graph shortest-path algorithms verify whether a path exists between two nodes. However, raw topology is completely agnostic to payload semantics: it cannot inspect process command-lines, detect privilege abuse, extract modified logic signatures, or recognize firewall blocks. In the negative scenario, it traverses normal operational links and falsely affirms compromise.
-* **TF-IDF / Chunk Retrieval Alone:** Top-k similarity retrieves the initial enterprise compromise and benign Level 1/0 status logs (due to query term overlap), completely jumping over intermediate DMZ blocks and synthesizing a false breach story.
-* **GraphMemory Agent:** Combines graph constraints with a small local LLM. The directed graph forces the agent to follow verified physical and logical conduits step-by-step; the LLM interprets process arguments and industrial payloads at each hop; and the notebook enforces bounded token budgets, cryptographic provenance citations, and deterministic fail-closed refusal when attack paths terminate.
+To rigorously separate the LLM's contribution from the deterministic graph rules, `benchmark.py` includes an ablation that replaces the local LLM with a template rule stub (`TemplateStubLLM`):
 
-*Run the complete 2-part benchmark suite locally:*
+| Evaluation Condition | Autonomous LLM Agent | Template Rule Stub | Architectural Finding |
+| :--- | :--- | :--- | :--- |
+| **Positive Aegis Intrusion** | `SUPPORTED` (Verified) | `SUPPORTED` (Verified) | Security verdicts are identical between LLM and Stub. |
+| **Negative Halted Intrusion** | `REFUTED` (Blocked) | `REFUTED` (Blocked) | Security boundaries and fail-closed rules are 100% deterministic. |
+| **Degraded Telemetry Case** | `INSUFFICIENT EVIDENCE` | `INSUFFICIENT EVIDENCE` | Verifier prevents ungrounded speculation regardless of model weights. |
+| **Forensic Prose Generation** | Dynamic contextual synthesis | Static template strings | The LLM's true contribution is semantic query parsing and human-readable prose. |
+
+*Run the complete 3-part benchmark suite locally:*
 ```bash
 python benchmark.py
 ```
+
+---
+
+## Known Limitations & Forensic Boundary Conditions
+
+To maintain engineering integrity, the following limitations are explicitly acknowledged:
+
+1. **Synthetic Proof-of-Concept Scenarios (Shared Authorship):** Both the positive intrusion scenario (`purdue_ot_incident`) and the negative control ablation (`purdue_ot_incident_halted_dmz`) were authored by the project maintainer. While they faithfully model real-world Purdue architectures (PERA / ISA-95) and realistic log formats (Sysmon, Zeek, Rockwell CIP), independent validation on third-party authored testbeds is required to prove generalized traversal.
+2. **Absence of Real-World Log Noise & Entity Resolution:** The Project Aegis testbed uses clean, canonical identifiers (`corp-ws-019`, `plc-ballast-01`). Real-world industrial environments exhibit high background noise, DHCP IP reassignment, multi-homed dual-NIC assets, and hostname variations that require probabilistic entity resolution before graph construction.
+3. **No Live Industrial Telemetry:** In accordance with Australian critical infrastructure protections (Security of Critical Infrastructure Act 2018) and strict industrial NDAs, live operational logs from operating mines, ports, or LNG refineries cannot be publicly distributed. High-fidelity synthetic logs are used in line with industry research standards.
+4. **Scope of the LLM vs Deterministic Verifier:** The LLM does not establish forensic ground truth. As proven in the Part 3 ablation, ground truth verdicts (`SUPPORTED`, `REFUTED`, `INSUFFICIENT EVIDENCE`) are governed by deterministic graph traversal and set-membership verification. The LLM serves solely as a flexible natural-language interface and narrative synthesizer.
+5. **Disk Snapshot Integrity vs Upstream Log Authenticity:** The SHA-256 byte digests guarantee post-acquisition file integrity (tamper detection once files are acquired on disk). They do not prove that an upstream Windows kernel or logging daemon was not tampered with prior to log generation.
 
 ---
 

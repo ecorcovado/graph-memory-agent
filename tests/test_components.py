@@ -1566,8 +1566,8 @@ class TestGraphMemoryAgent(unittest.TestCase):
         llm.set_agent(agent)
 
         answer = agent.run(TARGET_QUESTION)
-        self.assertIn("INSUFFICIENT EVIDENCE", answer)
-        self.assertTrue("modified_logic" in answer or "interlock_status" in answer)
+        self.assertIn("REFUTED", answer)
+        self.assertIn("blocked", answer.lower())
         self.assertNotIn("reached plc", answer.lower())
 
     def test_zero_fallback_unspecified_target_controller_fails_closed(self):
