@@ -97,7 +97,7 @@ GraphMemory Agent implements a 10-stage, fail-closed forensic ingestion and inve
 4. **Format Detection (`FormatDetector`):** Detects schema types (Sysmon, Zeek, Windows Security, CIP Controller, Historian, Physical Telemetry).
 5. **Specialized Adapters (`core/adapters/`):**
    - `SysmonAdapter`: Process creation (EID 1), Network connection (EID 3), File creation (EID 11), Registry (EID 12-14), DNS query (EID 22).
-   - `ZeekAdapter`: Connection telemetry (`conn.log`), DNS queries (`dns.log`), and security notices (`notice.log`).
+   - `ZeekAdapter`: Connection telemetry (`conn.log`), DNS queries (`dns.log`), and security notices (`notice.log`), supporting native TSV formats (`#separator`, `#set_separator`, `#fields`, `#types`, hex escape unescaping, and float epoch timestamp normalization).
    - `WindowsSecurityAdapter`: Remote network logon (EID 4624), local logon, and privilege assignment (EID 4672).
    - `FirewallAdapter`, `HistorianAdapter`, `ControllerAuditAdapter`, `ProcessTelemetryAdapter`: Industrial DMZ, supervisory, controller logic, and physical interlock observations.
 6. **Normalised Event Model (`NormalizedEvent`):** Canonical dataclass standardizing event times, subjects, predicates, objects, raw records, and Purdue levels.
@@ -114,6 +114,8 @@ GraphMemory Agent implements a 10-stage, fail-closed forensic ingestion and inve
   * `SUPPORTED`: An unbroken conduit chain connects the enterprise breach to target OT assets, validated by record-level citations.
   * `REFUTED`: Positive security telemetry (e.g. firewall rule `action: BLOCK` / `blocked_connection_to`) verifies that lateral movement was actively blocked by boundary controls before reaching industrial assets.
   * `INSUFFICIENT EVIDENCE`: Critical telemetry sources are missing from case ingestion or conduits contain unmonitored gaps without positive proof of blockage.
+* **Blocked-Edge Traversal Semantics:** Distinguishes evidence exploration from attack-path compromise progression. Edges representing boundary defenses (`blocked_connection_to`, `connection_denied`, firewall `action: BLOCK`) are preserved as immutable evidence records, but cannot be traversed as lateral movement transitions. The agent recognizes boundary enforcement and halts attack-path reconstruction at the perimeter.
+* **Per-Claim Target Binding & Independent Validation:** Every entity asserted in unstructured text or structured JSON is validated independently against verified atomic facts. A verified fact for `plc-ballast-01` cannot substantiate an additional unsupported assertion regarding `plc-other-01`. Furthermore, unsupported positive claims cannot bypass verification by being combined with `INSUFFICIENT EVIDENCE`.
 * **String-Aware & Escape-Aware JSON Scanner:** Balanced-brace scanner (`extract_json_objects`) tracking string boundaries and backslash escapes, reliably extracting structured answers even with embedded braces or escaped quotes in conversational prose.
 * **Plaintext & Structured Claim Validation:** Both JSON and plaintext answers are validated against gathered evidence. Claims asserting PLC logic modification strictly require predicate `modified_logic` from `CONTROLLER_AUDIT` on the target controller specified in the query or case manifest (e.g. `plc-ballast-01`); assertions of safety interlock suppression require physical interlock telemetry on the target actuator (e.g. `xv-4012`). Expected controller and actuator are dynamically bound with **zero hardcoded fallback**; if unspecified in both the query and case manifest, assertions of controller modification immediately fail closed (`INSUFFICIENT EVIDENCE`).
 * **XSS-Hardened Forensic HTML Reports:** All dynamic text (queries, model responses, raw record excerpts) is sanitized with `html.escape()`. Ingestion completeness (`COMPLETE` / `DEGRADED`) is audited separately from source byte hashes and attack path continuity.
@@ -151,7 +153,7 @@ python run_agent.py --case examples/purdue_ot_incident --question "Did the enter
 # 4. Run the comparative benchmark suite (Keyword Search vs Vector RAG vs Graph vs Ours)
 python benchmark.py
 
-# 5. Run offline unit tests (62 passing tests in ~0.2s)
+# 5. Run offline unit tests (66 passing tests in ~0.2s)
 python -m unittest tests/test_components.py
 ```
 
@@ -166,12 +168,12 @@ python -m unittest tests/test_components.py
 Target Query:
 > *"Did the enterprise compromise reach the PLC, and what safety interlock was bypassed?"*
 
-| Methodology | Purdue Conduit Continuity | Source Provenance | Conduit Recall / Gap | Policy Enforcement |
+| Methodology | Purdue Conduit Continuity | Source Digest Coverage | Conduit Recall / Gap | Policy Enforcement |
 | :--- | :--- | :--- | :--- | :--- |
-| **Keyword Search (Grep/BM25)** | 0% (Disconnected) | N/A (No Provenance Tracking) | 0.0% (4/4 edges missing) | NO (Cannot detect gaps) |
-| **TF-IDF Top-k Retrieval** | 25.0% (Broken at DMZ - 1/4 edges) | N/A (No Provenance Tracking) | 25.0% (3/4 edges missing) | NO (Speculates without verification) |
+| **Keyword Search (Grep/BM25)** | 0% (Disconnected) | N/A (No Digest Tracking) | 0.0% (4/4 edges missing) | NO (Cannot detect gaps) |
+| **TF-IDF Top-k Retrieval** | 25.0% (Broken at DMZ - 1/4 edges) | N/A (No Digest Tracking) | 25.0% (3/4 edges missing) | NO (Speculates without verification) |
 | **Unconstrained Graph (NetworkX)** | 100.0% (4/4 edges) | N/A (Topology Only, No Hashes) | 100.0% (Topology Overmatch) | NO (No policy enforcement) |
-| **GraphMemory Agent (Ours)** | **100% (Unbroken Chain - 4/4 edges)** | **100.0% (Cryptographic Hashes)** | **100.0% (4/4 edges verified)** | **PASS (3-Verdict Enforced)** |
+| **GraphMemory Agent (Ours)** | **100% (Unbroken Chain - 4/4 edges)** | **100.0% (SHA-256 Verified)** | **100.0% (4/4 edges verified)** | **PASS (3-Verdict Enforced)** |
 
 > **Benchmark Metric Calculation Details:**
 > * **TF-IDF Conduit Recall (25.0%):** Evaluated against the 4 ground-truth transitions. Top-k similarity matches 1 edge (`eng-ws-02` $\rightarrow$ `plc-ballast-01` due to keyword overlap with "PLC"), but misses 3 intermediate conduits (`corp-ws-019` $\rightarrow$ `dmz`, `dmz` $\rightarrow$ `scada`, and `plc` $\rightarrow$ `xv-4012`). The conduit gap rate is $75.0\%$ (3 of 4 edges missing), which causes flat retrieval to leap over the DMZ.

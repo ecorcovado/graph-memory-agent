@@ -240,10 +240,46 @@ class KnowledgeGraph:
 
         return results
 
-    def get_adjacent_nodes(self, node: str) -> List[str]:
-        """Returns all unique adjacent nodes (both incoming and outgoing)."""
+    def is_transition_blocked(self, source: str, target: str) -> bool:
+        """
+        Determines whether the transition from source to target was actively blocked by boundary defenses.
+        Returns True if any edge from source to target is marked blocked or represents a blocked connection.
+        """
+        if not self.graph.has_edge(source, target):
+            return False
+        edges = self.graph.get_edge_data(source, target) or {}
+        for attr in edges.values():
+            if attr.get("is_blocked", False) or attr.get("relation") in [
+                "blocked_connection_to", "connection_denied", "access_denied", "process_terminated"
+            ]:
+                return True
+            if attr.get("action") in ["BLOCK", "DENY"]:
+                return True
+        return False
+
+    def get_traversable_neighbors(self, node: str) -> List[str]:
+        """
+        Returns only adjacent nodes that can be reached via valid, unblocked attack-path transitions.
+        Distinguishes evidence exploration from attack-path compromise progression.
+        """
         if not self.graph.has_node(node):
             return []
+        traversable = []
+        for target in self.graph.successors(node):
+            if target != node and not self.is_transition_blocked(node, target):
+                if target not in traversable:
+                    traversable.append(target)
+        return traversable
+
+    def get_adjacent_nodes(self, node: str, traversable_only: bool = False) -> List[str]:
+        """
+        Returns adjacent nodes. If traversable_only is True, excludes nodes connected only
+        via blocked conduits (e.g. firewall blocked_connection_to).
+        """
+        if not self.graph.has_node(node):
+            return []
+        if traversable_only:
+            return self.get_traversable_neighbors(node)
         successors = list(self.graph.successors(node))
         predecessors = list(self.graph.predecessors(node))
         seen = set()

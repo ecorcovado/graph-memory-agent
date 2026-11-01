@@ -1624,6 +1624,100 @@ class TestGraphMemoryAgent(unittest.TestCase):
         self.assertIn("INSUFFICIENT EVIDENCE", ans)
         self.assertIn("plc-water-01", ans)
 
+    def test_blocked_edge_traversal_halted_at_security_boundary(self):
+        """v0.5.6: Blocked-edge traversal safeguard prevents agent from progressing across blocked boundary."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        neg_case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident_halted_dmz")
+        loader = CaseLoader(neg_case_dir)
+        kg = loader.load_case()
+
+        # 1. Graph layer checks
+        self.assertTrue(kg.is_transition_blocked("dmz-hist-mirror", "scada-ignition-gw01"))
+        traversable = kg.get_traversable_neighbors("dmz-hist-mirror")
+        self.assertNotIn("scada-ignition-gw01", traversable)
+
+        # 2. Agent traversal check: agent at dmz-hist-mirror instructed to hop to scada-ignition-gw01
+        client = MockOllamaClient(responses={
+            "select ONE neighbor": "ACTION: HOP | scada-ignition-gw01",
+            "Atomic Facts": "Telemetry at dmz-hist-mirror",
+        })
+        agent = GraphReaderAgent(client, kg, max_steps=4)
+        next_node, should_stop = agent.explore_node(
+            current_node="dmz-hist-mirror",
+            question="Did compromise reach SCADA?",
+            plan="1. dmz-hist-mirror 2. scada-ignition-gw01",
+            step=2,
+            visited_nodes={"corp-ws-019", "dmz-hist-mirror"},
+        )
+        self.assertIsNone(next_node)
+        self.assertTrue(should_stop)
+        self.assertTrue(any("ATTACK PATH BLOCKED" in entry[0] for entry in agent.execution_log))
+
+    def test_per_claim_independent_validation_valid_fact_cannot_substantiate_unrelated_controller(self):
+        """v0.5.6: Per-claim target binding: valid fact for plc-ballast-01 cannot substantiate additional plc-other-01 claim."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        cip_facts = [f for f in kg.atomic_facts.values() if f.relation == "modified_logic"]
+        self.assertTrue(len(cip_facts) > 0)
+        cip_fid = cip_facts[0].fact_id
+
+        # LLM cites valid fact for plc-ballast-01, but additionally asserts logic modification on plc-other-01
+        ans_text = f"The compromise reached the controllers. Both PLC-BALLAST-01 and PLC-OTHER-01 had their logic modified [{cip_fid}]."
+        client = MockOllamaClient(responses={"Target Question": ans_text})
+        agent = GraphReaderAgent(client, kg)
+        agent.notebook.add_note(step=1, source_node="eng-ws-02", content="Logic modified", fact_ids=[cip_fid])
+
+        ans = agent.synthesize_answer("Did the adversary modify controller logic?")
+        self.assertIn("INSUFFICIENT EVIDENCE", ans)
+        self.assertIn("plc-other-01", ans)
+        self.assertIn("modified_logic", ans)
+
+    def test_unsupported_positive_claim_smuggled_with_insufficient_evidence_fails_closed(self):
+        """v0.5.6: Unsupported positive claim cannot bypass verification by combining with 'INSUFFICIENT EVIDENCE'."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        cip_facts = [f for f in kg.atomic_facts.values() if f.relation == "modified_logic"]
+        self.assertTrue(len(cip_facts) > 0)
+        cip_fid = cip_facts[0].fact_id
+
+        # LLM output contains INSUFFICIENT EVIDENCE, but smuggles an unsupported claim about plc-other-01
+        ans_text = f"INSUFFICIENT EVIDENCE: Investigation path degraded, but attacker downloaded modified logic to plc-other-01 [{cip_fid}]."
+        client = MockOllamaClient(responses={"Target Question": ans_text})
+        agent = GraphReaderAgent(client, kg)
+        agent.notebook.add_note(step=1, source_node="eng-ws-02", content="Logic modified", fact_ids=[cip_fid])
+
+        ans = agent.synthesize_answer("Did the adversary modify controller logic?")
+        self.assertIn("INSUFFICIENT EVIDENCE", ans)
+        self.assertIn("plc-other-01", ans)
+
+    def test_zeek_custom_set_separator_handling(self):
+        """v0.5.6: Native Zeek TSV parser correctly respects custom #set_separator delimiter."""
+        from core.adapters.zeek import ZeekAdapter
+
+        sep = ZeekAdapter.parse_tsv_set_separator("#set_separator\t;")
+        self.assertEqual(sep, ";")
+
+        sep_hex = ZeekAdapter.parse_tsv_set_separator("#set_separator \\x3b")
+        self.assertEqual(sep_hex, ";")
+
+        fields = ["ts", "tags"]
+        types = ["time", "vector[string]"]
+        line = "1730112310.12\talpha;beta;gamma"
+        rec = ZeekAdapter.parse_tsv_line(
+            fields=fields,
+            line_str=line,
+            types=types,
+            separator="\t",
+            set_separator=";",
+        )
+        self.assertEqual(rec["tags"], ["alpha", "beta", "gamma"])
+
 
 if __name__ == "__main__":
     unittest.main()

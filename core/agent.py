@@ -91,8 +91,10 @@ class GraphReaderAgent:
         self.max_steps = max_steps
         self.verbose = verbose
         self.notebook = Notebook(max_tokens=notebook_max_tokens)
+        self.execution_log: List[Tuple[str, str]] = []
 
     def _log(self, title: str, text: str):
+        self.execution_log.append((title, text))
         if self.verbose:
             print(f"\n[{title}]")
             print(f"{text.strip()}")
@@ -301,8 +303,14 @@ class GraphReaderAgent:
             match = re.search(r"(?:HOP\s*\|\s*|HOP:\s*|HOP\s+TO\s+)(.+)", decision, re.IGNORECASE)
             target = match.group(1).strip().lower() if match else decision.strip().lower()
 
-        # Strict exact match against unvisited neighbors (disallows ambiguous substrings or visited loops)
+        # Blocked Edge Traversal Safeguard: Agent never treats blocked connections as valid attack path transitions
         if target in unvisited_neighbors:
+            if self.kg.is_transition_blocked(current_node, target):
+                self._log(
+                    f"STEP {step}: ATTACK PATH BLOCKED",
+                    f"Lateral movement from '{current_node}' to '{target}' was blocked by boundary defense. Attack path cannot progress across blocked conduit.",
+                )
+                return None, True
             return target, False
 
         if target in visited:
@@ -315,6 +323,12 @@ class GraphReaderAgent:
         ranked_unvisited = self.rank_candidate_neighbors(current_node, unvisited_neighbors, question)
         if ranked_unvisited:
             chosen = ranked_unvisited[0]
+            if self.kg.is_transition_blocked(current_node, chosen):
+                self._log(
+                    f"STEP {step}: ATTACK PATH BLOCKED",
+                    f"Lateral movement from '{current_node}' to '{chosen}' was blocked by boundary defense. Attack path cannot progress across blocked conduit.",
+                )
+                return None, True
             self._log(
                 f"STEP {step}: ACTION VALIDATION ROUTING",
                 f"Target '{target}' invalid or unranked. Ranked routing to '{chosen}' (tier/relevance priority)",
@@ -526,92 +540,114 @@ class GraphReaderAgent:
                 stmt = claim.get("statement", "").lower()
                 c_fids = claim.get("fact_ids", [])
                 claim_facts = [self.kg.atomic_facts.get(fid) for fid in c_fids if fid in self.kg.atomic_facts]
-                if ("plc" in stmt or "logic" in stmt or "controller" in stmt) and "modif" in stmt:
-                    if not expected_target_ctrl:
+                stmt_ctrls = set(re.findall(r"plc-[\w-]+", stmt))
+                if ("plc" in stmt or "logic" in stmt or "controller" in stmt) and any(w in stmt for w in ["modif", "download", "logic", "compromis"]):
+                    targets_to_check = stmt_ctrls if stmt_ctrls else ({expected_target_ctrl} if expected_target_ctrl else set())
+                    if not targets_to_check:
                         self._log("CLAIM VALIDATION FAILED", "Structured claim asserts controller modification, but no target controller was specified in query or case manifest.")
                         return (
                             "INSUFFICIENT EVIDENCE: Structured claim asserts controller logic modification, but no target "
                             "controller was defined in query or case manifest."
                         )
-                    has_exact_target = any(
-                        f.relation == "modified_logic"
-                        and f.source_type == "CONTROLLER_AUDIT"
-                        and f.object_entity == expected_target_ctrl
-                        for f in claim_facts if f
-                    )
-                    if not has_exact_target:
-                        self._log("CLAIM VALIDATION FAILED", f"Structured claim '{stmt}' does not verify predicate 'modified_logic' from CONTROLLER_AUDIT on expected target controller '{expected_target_ctrl}'.")
-                        return (
-                            f"INSUFFICIENT EVIDENCE: Claim '{claim.get('statement')}' cites facts that do not "
-                            f"verify required predicate 'modified_logic' from CONTROLLER_AUDIT on expected target controller '{expected_target_ctrl}'."
+                    # Every claimed controller in THIS claim statement must have verified predicate 'modified_logic' from CONTROLLER_AUDIT
+                    for target_c in targets_to_check:
+                        has_exact_target = any(
+                            f.relation == "modified_logic"
+                            and f.source_type == "CONTROLLER_AUDIT"
+                            and f.object_entity == target_c
+                            for f in claim_facts if f
                         )
+                        if not has_exact_target:
+                            self._log("CLAIM VALIDATION FAILED", f"Structured claim '{stmt}' does not verify predicate 'modified_logic' from CONTROLLER_AUDIT on target controller '{target_c}'.")
+                            return (
+                                f"INSUFFICIENT EVIDENCE: Claim '{claim.get('statement')}' cites facts that do not "
+                                f"verify required predicate 'modified_logic' from CONTROLLER_AUDIT on target controller '{target_c}'."
+                            )
 
         # B. Plaintext Claim Validation (prevents verification bypass on unstructured text)
         ans_lower = answer.lower()
-        if "insufficient evidence" not in ans_lower and "refuted" not in ans_lower:
-            # If answer asserts PLC modification or download
-            if ("plc" in ans_lower or "controller" in ans_lower) and any(w in ans_lower for w in ["modif", "download", "logic"]):
-                if not expected_target_ctrl:
-                    self._log("CLAIM VALIDATION FAILED", "Answer asserts controller modification, but no target controller was specified in query or case manifest.")
-                    return (
-                        "INSUFFICIENT EVIDENCE: Answer asserts controller logic modification, but no target controller "
-                        "was defined in query or case manifest."
-                    )
-                # Expected target controller is strictly bound to requirements/question, not what the answer claims!
-                claimed_ctrls = set(re.findall(r"plc-[\w-]+", ans_lower))
-                if claimed_ctrls and expected_target_ctrl not in claimed_ctrls:
-                    self._log("CLAIM VALIDATION FAILED", f"Answer claims modification on '{claimed_ctrls}', which does not substantiate expected target '{expected_target_ctrl}'.")
-                    return (
-                        f"INSUFFICIENT EVIDENCE: Generated answer claims modification on non-target controller(s) "
-                        f"{sorted(list(claimed_ctrls))}, which does not substantiate expected target '{expected_target_ctrl}'."
-                    )
 
-                valid_plc_facts = [
-                    f for f in all_cited_facts
-                    if f and f.relation == "modified_logic"
-                    and f.source_type == "CONTROLLER_AUDIT"
-                    and f.object_entity == expected_target_ctrl
-                ]
-                if not valid_plc_facts:
-                    self._log("CLAIM VALIDATION FAILED", f"Assertion of PLC logic modification lacks verified fact with predicate 'modified_logic' on expected target controller '{expected_target_ctrl}'.")
-                    return (
-                        f"INSUFFICIENT EVIDENCE: Generated answer asserts PLC logic modification, but cited facts "
-                        f"do not verify predicate 'modified_logic' from CONTROLLER_AUDIT on expected target controller '{expected_target_ctrl}'."
-                    )
+        # Check for affirmative assertions of PLC / controller logic modification
+        # An affirmative assertion claims compromise/modification/download, excluding explicit negative statements
+        has_plc_keywords = ("plc" in ans_lower or "controller" in ans_lower) and any(w in ans_lower for w in ["modif", "download", "logic", "compromis", "injected"])
+        is_negative_context = any(neg in ans_lower for neg in [
+            "did not compromise", "no logic modification", "did not reach plc", "not reach the plc",
+            "prevented from modifying", "without modifying", "unmodified"
+        ])
 
-            # If answer asserts safety interlock suppression / bypass
-            if "interlock" in ans_lower and any(w in ans_lower for w in ["bypass", "suppress", "inhibit", "override", "disarm"]):
-                if not expected_target_act:
-                    self._log("CLAIM VALIDATION FAILED", "Answer asserts interlock bypass, but no target actuator was specified in query or case manifest.")
-                    return (
-                        "INSUFFICIENT EVIDENCE: Answer asserts safety interlock bypass, but no target actuator "
-                        "was defined in query or case manifest."
-                    )
-                claimed_tags = set(re.findall(r"[a-z]{2}-\d{4}", ans_lower))
-                if claimed_tags and expected_target_act not in claimed_tags:
-                    self._log("CLAIM VALIDATION FAILED", f"Answer claims bypass on '{claimed_tags}', which does not substantiate expected actuator '{expected_target_act}'.")
-                    return (
-                        f"INSUFFICIENT EVIDENCE: Generated answer claims bypass on non-target tag(s) "
-                        f"{sorted(list(claimed_tags))}, which does not substantiate expected target '{expected_target_act}'."
-                    )
+        if has_plc_keywords and not is_negative_context:
+            claimed_ctrls = set(re.findall(r"plc-[\w-]+", ans_lower))
+            if not claimed_ctrls and not expected_target_ctrl:
+                self._log("CLAIM VALIDATION FAILED", "Answer asserts controller modification, but no target controller was specified in query or case manifest.")
+                return (
+                    "INSUFFICIENT EVIDENCE: Answer asserts controller logic modification, but no target controller "
+                    "was defined in query or case manifest."
+                )
 
-                valid_interlock_facts = []
-                for f in all_cited_facts:
-                    if not f:
-                        continue
-                    if f.source_type == "PROCESS_TELEMETRY" and f.relation == "interlock_status":
-                        tag_match = (f.subject == expected_target_act or expected_target_act in f.subject)
-                        status_val = str(f.object_entity or f.attributes.get("interlock_status", "")).lower()
-                        is_bypassed = any(term in status_val for term in ["suppress", "bypass", "inhibit", "override", "disarm", "false", "0"])
-                        if tag_match and is_bypassed:
-                            valid_interlock_facts.append(f)
+            # Independent Per-Claim Target Binding: EVERY claimed controller must be independently substantiated!
+            # A valid fact for plc-ballast-01 CANNOT substantiate an additional unsupported claim for plc-other-01!
+            if claimed_ctrls:
+                for ctrl in sorted(list(claimed_ctrls)):
+                    valid_ctrl_facts = [
+                        f for f in all_cited_facts
+                        if f and f.relation == "modified_logic"
+                        and f.source_type == "CONTROLLER_AUDIT"
+                        and f.object_entity == ctrl
+                    ]
+                    if not valid_ctrl_facts:
+                        self._log("CLAIM VALIDATION FAILED", f"Assertion of PLC logic modification on '{ctrl}' lacks verified fact with predicate 'modified_logic' from CONTROLLER_AUDIT on '{ctrl}'.")
+                        return (
+                            f"INSUFFICIENT EVIDENCE: Generated answer asserts logic modification on controller '{ctrl}', "
+                            f"but cited facts do not verify required predicate 'modified_logic' from CONTROLLER_AUDIT on '{ctrl}'."
+                        )
 
-                if not valid_interlock_facts:
-                    self._log("CLAIM VALIDATION FAILED", f"Assertion of safety interlock bypass lacks cited fact verifying suppressed interlock on target tag '{expected_target_act}'.")
-                    return (
-                        f"INSUFFICIENT EVIDENCE: Generated answer asserts safety interlock bypass, but cited facts "
-                        f"do not verify suppressed/bypassed interlock telemetry on target tag '{expected_target_act}'."
-                    )
+            # Furthermore, if an expected target controller was required, it must be substantiated
+            if expected_target_ctrl and expected_target_ctrl not in claimed_ctrls:
+                self._log("CLAIM VALIDATION FAILED", f"Answer did not substantiate expected target controller '{expected_target_ctrl}'.")
+                return (
+                    f"INSUFFICIENT EVIDENCE: Generated answer claims modification on non-target controller(s) "
+                    f"{sorted(list(claimed_ctrls))}, which does not substantiate expected target '{expected_target_ctrl}'."
+                )
+
+        # Check for affirmative assertions of safety interlock suppression / bypass
+        has_interlock_keywords = "interlock" in ans_lower and any(w in ans_lower for w in ["bypass", "suppress", "inhibit", "override", "disarm"])
+        is_interlock_negative = any(neg in ans_lower for neg in ["not bypassed", "no interlock was bypassed", "armed and active", "armed_and_active"])
+
+        if has_interlock_keywords and not is_interlock_negative:
+            claimed_tags = set(re.findall(r"[a-z]{2}-\d{4}", ans_lower))
+            if not claimed_tags and not expected_target_act:
+                self._log("CLAIM VALIDATION FAILED", "Answer asserts interlock bypass, but no target actuator was specified in query or case manifest.")
+                return (
+                    "INSUFFICIENT EVIDENCE: Answer asserts safety interlock bypass, but no target actuator "
+                    "was defined in query or case manifest."
+                )
+
+            # Independent Per-Claim Tag Binding: EVERY claimed tag must have verified suppressed interlock telemetry!
+            if claimed_tags:
+                for tag in sorted(list(claimed_tags)):
+                    valid_tag_facts = []
+                    for f in all_cited_facts:
+                        if not f:
+                            continue
+                        if f.source_type == "PROCESS_TELEMETRY" and f.relation == "interlock_status":
+                            tag_match = (f.subject == tag or f.object_entity == tag or tag in f.text.lower())
+                            status_val = str(f.object_entity or f.attributes.get("interlock_status", "")).lower()
+                            is_bypassed = any(term in status_val for term in ["suppress", "bypass", "inhibit", "override", "disarm", "false", "0"])
+                            if tag_match and is_bypassed:
+                                valid_tag_facts.append(f)
+                    if not valid_tag_facts:
+                        self._log("CLAIM VALIDATION FAILED", f"Assertion of safety interlock bypass on tag '{tag}' lacks cited fact verifying suppressed interlock on '{tag}'.")
+                        return (
+                            f"INSUFFICIENT EVIDENCE: Generated answer asserts safety interlock bypass on tag '{tag}', "
+                            f"but cited facts do not verify suppressed/bypassed interlock telemetry on '{tag}'."
+                        )
+
+            if expected_target_act and expected_target_act not in claimed_tags:
+                self._log("CLAIM VALIDATION FAILED", f"Answer claims bypass on '{claimed_tags}', which does not substantiate expected actuator '{expected_target_act}'.")
+                return (
+                    f"INSUFFICIENT EVIDENCE: Generated answer claims bypass on non-target tag(s) "
+                    f"{sorted(list(claimed_tags))}, which does not substantiate expected target '{expected_target_act}'."
+                )
 
         self._log("EVIDENCE VERIFIED", f"All cited Fact IDs verified against notebook: {cited_fact_ids}")
         self._log("FINAL ANSWER", answer)

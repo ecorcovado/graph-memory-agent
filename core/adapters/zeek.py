@@ -32,6 +32,22 @@ class ZeekAdapter(BaseLogAdapter):
         return "\t"
 
     @staticmethod
+    def parse_tsv_set_separator(line_str: str) -> str:
+        """Extracts declared collection delimiter from a Zeek #set_separator line, e.g. '#set_separator \\x2c' or '#set_separator ,'."""
+        line = line_str.strip()
+        if line.startswith("#set_separator"):
+            parts = line.split(maxsplit=1)
+            if len(parts) > 1:
+                raw_sep = parts[1].strip()
+                if raw_sep.startswith(r"\x"):
+                    try:
+                        return chr(int(raw_sep[2:], 16))
+                    except ValueError:
+                        return ","
+                return raw_sep
+        return ","
+
+    @staticmethod
     def parse_tsv_headers(line_str: str, separator: str = "\t") -> List[str]:
         """Extracts field names from a Zeek #fields metadata line respecting declared separator."""
         parts = line_str.strip().split(separator)
@@ -69,6 +85,7 @@ class ZeekAdapter(BaseLogAdapter):
         line_str: str,
         types: Optional[List[str]] = None,
         separator: str = "\t",
+        set_separator: str = ",",
         unset_field: str = "-",
         empty_field: str = "(empty)",
     ) -> Dict[str, Any]:
@@ -100,7 +117,7 @@ class ZeekAdapter(BaseLogAdapter):
                     elif field_type == "bool":
                         record[field_name] = unescaped_val.lower() in ("t", "true", "1")
                     elif field_type.startswith("set") or field_type.startswith("vector"):
-                        items = [cls.unescape_zeek_string(v.strip()) for v in unescaped_val.split(",") if v.strip()]
+                        items = [cls.unescape_zeek_string(v.strip()) for v in unescaped_val.split(set_separator) if v.strip()]
                         record[field_name] = items
                     else:
                         # 2. Heuristic fallback when #types is omitted

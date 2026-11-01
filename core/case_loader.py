@@ -336,6 +336,7 @@ class CaseLoader:
 
                 if is_zeek_tsv:
                     separator = "\t"
+                    set_separator = ","
                     tsv_fields: List[str] = []
                     tsv_types: List[str] = []
                     unset_field = "-"
@@ -344,6 +345,8 @@ class CaseLoader:
                     for l in raw_lines:
                         if l.startswith("#separator"):
                             separator = ZeekAdapter.parse_tsv_separator(l)
+                        elif l.startswith("#set_separator"):
+                            set_separator = ZeekAdapter.parse_tsv_set_separator(l)
                         elif l.startswith("#empty_field"):
                             parts = l.split(maxsplit=1)
                             if len(parts) > 1:
@@ -366,6 +369,7 @@ class CaseLoader:
                             line_str=line_str,
                             types=tsv_types,
                             separator=separator,
+                            set_separator=set_separator,
                             unset_field=unset_field,
                             empty_field=empty_field,
                         )
@@ -447,6 +451,11 @@ class CaseLoader:
 
             # Stage 9: MultiDiGraph Edge Construction
             if ev.subject and ev.object_entity and ev.subject != ev.object_entity:
+                is_blocked_edge = (
+                    ev.predicate in ["blocked_connection_to", "connection_denied", "access_denied", "process_terminated"]
+                    or ev.attributes.get("action") in ["BLOCK", "DENY"]
+                    or "block" in str(ev.attributes.get("rule_id", "")).lower()
+                )
                 kg.graph.add_edge(
                     ev.subject,
                     ev.object_entity,
@@ -455,6 +464,8 @@ class CaseLoader:
                     evidence_basis=basis,
                     source_type=ev.source_type,
                     fact_id=atomic_fact.fact_id,
+                    is_blocked=is_blocked_edge,
+                    traversable=(not is_blocked_edge),
                 )
 
         # Ingestion Audit Completeness Report
