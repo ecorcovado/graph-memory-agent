@@ -83,6 +83,9 @@ def benchmark_keyword_search(case_dir: str, ground_truth: Optional[List[Tuple[st
     elapsed = (time.perf_counter() - start_t) * 1000
     continuity_pct = calculate_consecutive_continuity(found_flags)
     continuity_str = "0% (Disconnected)" if continuity_pct == 0.0 else f"{continuity_pct}% (Disconnected)"
+    found_count = sum(found_flags)
+    total_gt = len(ground_truth)
+    recall_pct = round((found_count / total_gt) * 100, 1) if total_gt else 0.0
 
     return {
         "method": "Keyword Search (Grep/BM25)",
@@ -90,7 +93,7 @@ def benchmark_keyword_search(case_dir: str, ground_truth: Optional[List[Tuple[st
         "continuity_pct": continuity_pct,
         "source_digest_coverage": "N/A (No Digest Tracking)",
         "provenance_accuracy": "N/A (No Digest Tracking)",
-        "conduit_recall": "0.0% (4/4 edges missing)",
+        "conduit_recall": f"{recall_pct}% ({found_count}/{total_gt} transitions)",
         "missing_evidence_detection": "NO (Cannot detect gaps)",
         "tokens_consumed": 0,
         "latency_ms": round(elapsed, 2),
@@ -147,16 +150,17 @@ def benchmark_vector_rag(case_dir: str, ground_truth: Optional[List[Tuple[str, s
 
     # Dynamic metrics calculated directly from chunk contents and ground truth evaluation
     tokens_consumed = sum(max(1, len(ch) // 4) for ch in top_chunks)
-    missing_edges = len(ground_truth) - sum(found_flags)
-    unverified_pct = round((missing_edges / len(ground_truth)) * 100, 1) if ground_truth else 0.0
+    found_count = sum(found_flags)
+    total_gt = len(ground_truth)
+    recall_pct = round((found_count / total_gt) * 100, 1) if total_gt else 0.0
 
     return {
         "method": "TF-IDF Top-k Retrieval",
-        "path_continuity": f"{continuity_pct}% (Broken at DMZ - {sum(found_flags)}/{len(ground_truth)} edges)",
+        "path_continuity": f"{continuity_pct}% (Broken at DMZ - {found_count}/{total_gt} edges)",
         "continuity_pct": continuity_pct,
         "source_digest_coverage": "N/A (No Digest Tracking)",
         "provenance_accuracy": "N/A (No Digest Tracking)",
-        "conduit_recall": f"{round(100.0 - unverified_pct, 1)}% ({missing_edges}/{len(ground_truth)} edges missing)",
+        "conduit_recall": f"{recall_pct}% ({found_count}/{total_gt} transitions)",
         "missing_evidence_detection": "NO (Speculates without verification)",
         "tokens_consumed": tokens_consumed,
         "latency_ms": round(elapsed, 2),
@@ -187,15 +191,17 @@ def benchmark_graph_only(case_dir: str, ground_truth: Optional[List[Tuple[str, s
     # Dynamic token estimation from graph edge attributes
     edge_texts = [attr.get("text", "") for u, v, k, attr in kg.graph.edges(keys=True, data=True)]
     tokens_consumed = sum(max(1, len(t) // 4) for t in edge_texts) if edge_texts else len(kg.graph.nodes) * 25
-    missing_edges = len(ground_truth) - sum(found_flags)
+    found_count = sum(found_flags)
+    total_gt = len(ground_truth)
+    recall_pct = round((found_count / total_gt) * 100, 1) if total_gt else 0.0
 
     return {
         "method": "Unconstrained Graph (NetworkX)",
-        "path_continuity": f"{continuity_pct}% ({sum(found_flags)}/{len(ground_truth)} edges)",
+        "path_continuity": f"{continuity_pct}% ({found_count}/{total_gt} edges)",
         "continuity_pct": continuity_pct,
         "source_digest_coverage": "N/A (Topology Only, No Hash Audit)",
         "provenance_accuracy": "N/A (Topology Only, No Hash Audit)",
-        "conduit_recall": f"100.0% ({sum(found_flags)}/{len(ground_truth)} edges present)",
+        "conduit_recall": f"{recall_pct}% ({found_count}/{total_gt} transitions)",
         "missing_evidence_detection": "NO (No policy enforcement)",
         "tokens_consumed": tokens_consumed,
         "latency_ms": round(elapsed, 2),
@@ -374,7 +380,7 @@ def benchmark_graph_memory_agent(case_dir: str, ground_truth: Optional[List[Tupl
     )
     prov_pct = round((valid_hashes / len(verified_fids)) * 100, 1) if verified_fids else 0.0
     provenance_accuracy_str = f"{prov_pct}% (Cryptographic Hashes)" if prov_pct == 100.0 else f"{prov_pct}%"
-    source_digest_str = f"{prov_pct}% (SHA-256 Verified)" if prov_pct == 100.0 else f"{prov_pct}%"
+    source_digest_str = f"{prov_pct}% (Digest Recorded for Cited Sources)" if prov_pct == 100.0 else f"{prov_pct}%"
 
     # Dynamic citation audit: verify zero unverified or fabricated citations in generated answer
     candidate_citations = set(re.findall(r"\b[a-f0-9]{8,64}_R\d+_[A-Za-z0-9_]+\b", answer_complete))
@@ -392,6 +398,9 @@ def benchmark_graph_memory_agent(case_dir: str, ground_truth: Optional[List[Tupl
 
     elapsed = (time.perf_counter() - start_t) * 1000
     path_continuity_str = "100% (Unbroken Purdue Chain)" if continuity_pct == 100.0 else f"{continuity_pct}% (Purdue Chain)"
+    found_count = sum(found_flags)
+    total_gt = len(ground_truth)
+    recall_pct = round((found_count / total_gt) * 100, 1) if total_gt else 0.0
 
     return {
         "method": "GraphMemory Agent (Ours)",
@@ -399,7 +408,7 @@ def benchmark_graph_memory_agent(case_dir: str, ground_truth: Optional[List[Tupl
         "continuity_pct": continuity_pct,
         "source_digest_coverage": source_digest_str,
         "provenance_accuracy": provenance_accuracy_str,
-        "conduit_recall": "100.0% (4/4 edges verified)",
+        "conduit_recall": f"{recall_pct}% ({found_count}/{total_gt} transitions)",
         "unverified_citation_rate": unverified_citation_str,
         "hallucination_rate": unverified_citation_str,
         "missing_evidence_detection": "PASS (3-Verdict Enforced)" if degraded_detected else "NO",
@@ -484,12 +493,16 @@ def benchmark_negative_scenario(neg_case_dir: str) -> Dict[str, Any]:
     is_insufficient = "INSUFFICIENT EVIDENCE" in answer
     correct_verdict = is_refuted or is_insufficient
     ans_lower = answer.lower()
-    false_positive = (
-        any(w in ans_lower for w in ["reached plc", "modified logic on plc", "interlock was suppressed"])
-        and not correct_verdict
-    )
 
-    verdict_label = "REFUTED (Positive Firewall Block Telemetry)" if is_refuted else ("INSUFFICIENT EVIDENCE" if is_insufficient else "FALSE POSITIVE")
+    # Affirmative claim detection: inspect assertions independently of verdict markers
+    affirmative_breach_claim = any(
+        w in ans_lower for w in ["reached plc", "reached the plc", "modified logic", "downloaded logic", "interlock was suppressed"]
+    ) and not any(
+        neg in ans_lower for neg in ["did not", "not reach", "no logic modification", "refuted", "blocked", "halted"]
+    )
+    false_positive = affirmative_breach_claim or (not correct_verdict)
+
+    verdict_label = "REFUTED (Conduit Blocked at Level 3.5 DMZ)" if is_refuted else ("INSUFFICIENT EVIDENCE" if is_insufficient else "FALSE POSITIVE")
 
     return {
         "scenario": "Negative Scenario: Intrusion Halted at Level 3.5 DMZ",
@@ -502,10 +515,12 @@ def benchmark_negative_scenario(neg_case_dir: str) -> Dict[str, Any]:
     }
 
 
-def benchmark_llm_vs_stub_ablation(case_dir: str, neg_case_dir: str) -> Dict[str, Any]:
+def benchmark_deterministic_rule_stub_evaluation(case_dir: str, neg_case_dir: str) -> Dict[str, Any]:
     """
-    6. LLM vs Rule-Stub Ablation (v0.5.6):
-    Replaces the LLM with a template rule-stub to isolate and measure the LLM's contribution.
+    6. Deterministic Rule-Stub Baseline Evaluation (v0.5.7):
+    Executes a deterministic rule stub (TemplateStubLLM) across positive and negative scenarios
+    to verify that security boundaries and fail-closed policies execute deterministically
+    without requiring model weights or stochastic reasoning.
     """
     loader_pos = CaseLoader(case_dir)
     kg_pos = loader_pos.load_case()
@@ -535,7 +550,7 @@ def run_benchmarks():
     ground_truth = load_ground_truth_transitions(case_dir)
 
     print("\n" + "=" * 90)
-    print("  AEGIS INCIDENT RECONSTRUCTION EVALUATION SUITE (v0.5.6)")
+    print("  AEGIS INCIDENT RECONSTRUCTION EVALUATION SUITE (v0.5.7)")
     print(f"  Target Query: '{TARGET_QUESTION}'")
     print(f"  Ground Truth Transitions ({len(ground_truth)} primary edges):")
     for idx, (s, r, d) in enumerate(ground_truth, 1):
@@ -578,9 +593,9 @@ def run_benchmarks():
         print(f"  Execution Latency:     {neg_res['latency_ms']} ms")
 
         print("\n" + "=" * 90)
-        print("[PART 3: LLM VS DETERMINISTIC STUB ABLATION — ISOLATING MODEL CONTRIBUTION]")
+        print("[PART 3: DETERMINISTIC RULE-STUB BASELINE EVALUATION]")
         print("=" * 90)
-        ablation_res = benchmark_llm_vs_stub_ablation(case_dir, neg_case_dir)
+        ablation_res = benchmark_deterministic_rule_stub_evaluation(case_dir, neg_case_dir)
         print(f"  Positive Case Stub Verdict: {ablation_res['positive_verdict']}")
         print(f"  Negative Case Stub Verdict: {ablation_res['negative_verdict']}")
         print(f"  Architectural Finding:      {ablation_res['conclusion']}")

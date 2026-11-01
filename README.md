@@ -114,6 +114,9 @@ GraphMemory Agent implements a 10-stage, fail-closed forensic ingestion and inve
   * `SUPPORTED`: An unbroken conduit chain connects the enterprise breach to target OT assets, validated by record-level citations.
   * `REFUTED`: Positive security telemetry (e.g. firewall rule `action: BLOCK` / `blocked_connection_to`) verifies that lateral movement was actively blocked by boundary controls before reaching industrial assets.
   * `INSUFFICIENT EVIDENCE`: Critical telemetry sources are missing from case ingestion or conduits contain unmonitored gaps without positive proof of blockage.
+* **Target-Correlated Defense Refutation:** The `REFUTED` verdict is strictly triggered only when a verified blocked boundary flow lies directly along the explored lateral movement path to the investigated target asset. Blocked connection attempts on unrelated systems do not falsely claim that the overall intrusion was refuted.
+* **Clause-Level Forensic Assertion Validation:** Evaluates entity claims at sentence and contrastive clause boundaries (`[.;\n]`, `however`, `but`, `while`, `although`). A negative assertion on one entity (e.g. `PLC-OTHER-01 did not experience logic modification`) cannot suppress verification of separate affirmative assertions on another target (`PLC-BALLAST-01 downloaded modified logic`).
+* **Multi-Edge Temporal State Resolution:** Evaluates network connectivity in `MultiDiGraph` by recognizing that an attacker's initial blocked connection attempt does not invalidate a subsequent allowed connection on an alternate port or credential.
 * **Blocked-Edge Traversal Semantics:** Distinguishes evidence exploration from attack-path compromise progression. Edges representing boundary defenses (`blocked_connection_to`, `connection_denied`, firewall `action: BLOCK`) are preserved as immutable evidence records, but cannot be traversed as lateral movement transitions. The agent recognizes boundary enforcement and halts attack-path reconstruction at the perimeter.
 * **Per-Claim Target Binding & Independent Validation:** Every entity asserted in unstructured text or structured JSON is validated independently against verified atomic facts. A verified fact for `plc-ballast-01` cannot substantiate an additional unsupported assertion regarding `plc-other-01`. Furthermore, unsupported positive claims cannot bypass verification by being combined with `INSUFFICIENT EVIDENCE`.
 * **String-Aware & Escape-Aware JSON Scanner:** Balanced-brace scanner (`extract_json_objects`) tracking string boundaries and backslash escapes, reliably extracting structured answers even with embedded braces or escaped quotes in conversational prose.
@@ -153,7 +156,7 @@ python run_agent.py --case examples/purdue_ot_incident --question "Did the enter
 # 4. Run the comparative benchmark suite (Keyword Search vs Vector RAG vs Graph vs Ours)
 python benchmark.py
 
-# 5. Run offline unit tests (66 passing tests in ~0.2s)
+# 5. Run offline unit tests (70 passing tests in ~0.15s)
 python -m unittest tests/test_components.py
 ```
 
@@ -170,10 +173,10 @@ Target Query:
 
 | Methodology | Purdue Conduit Continuity | Source Digest Coverage | Conduit Recall / Gap | Policy Enforcement |
 | :--- | :--- | :--- | :--- | :--- |
-| **Keyword Search (Grep/BM25)** | 0% (Disconnected) | N/A (No Digest Tracking) | 0.0% (4/4 edges missing) | NO (Cannot detect gaps) |
-| **TF-IDF Top-k Retrieval** | 25.0% (Broken at DMZ - 1/4 edges) | N/A (No Digest Tracking) | 25.0% (3/4 edges missing) | NO (Speculates without verification) |
-| **Unconstrained Graph (NetworkX)** | 100.0% (4/4 edges) | N/A (Topology Only, No Hashes) | 100.0% (Topology Overmatch) | NO (No policy enforcement) |
-| **GraphMemory Agent (Ours)** | **100% (Unbroken Chain - 4/4 edges)** | **100.0% (SHA-256 Verified)** | **100.0% (4/4 edges verified)** | **PASS (3-Verdict Enforced)** |
+| **Keyword Search (Grep/BM25)** | 0% (Disconnected) | N/A (No Digest Tracking) | 25.0% (1/4 transitions) | NO (Cannot detect gaps) |
+| **TF-IDF Top-k Retrieval** | 25.0% (Broken at DMZ - 1/4 edges) | N/A (No Digest Tracking) | 25.0% (1/4 transitions) | NO (Speculates without verification) |
+| **Unconstrained Graph (NetworkX)** | 100.0% (4/4 edges) | N/A (Topology Only, No Hashes) | 100.0% (4/4 transitions) | NO (No policy enforcement) |
+| **GraphMemory Agent (Ours)** | **100% (Unbroken Chain - 4/4 edges)** | **100.0% (Digest Recorded for Cited Sources)** | **100.0% (4/4 transitions)** | **PASS (3-Verdict Enforced)** |
 
 > **Benchmark Metric Calculation Details:**
 > * **TF-IDF Conduit Recall (25.0%):** Evaluated against the 4 ground-truth transitions. Top-k similarity matches 1 edge (`eng-ws-02` $\rightarrow$ `plc-ballast-01` due to keyword overlap with "PLC"), but misses 3 intermediate conduits (`corp-ws-019` $\rightarrow$ `dmz`, `dmz` $\rightarrow$ `scada`, and `plc` $\rightarrow$ `xv-4012`). The conduit gap rate is $75.0\%$ (3 of 4 edges missing), which causes flat retrieval to leap over the DMZ.
@@ -192,9 +195,9 @@ Target Query:
 | :--- | :--- | :--- | :--- | :--- |
 | **Purdue Continuity** | 0.0% (Disconnected) | 0.0% (No Bridge) | 100.0% (Topology Overmatch) | **25.0% (Halted at Level 3.5)** |
 | **Conduit Integrity** | Broken | Broken | Undetected | **VERIFIED HALT AT DMZ** |
-| **Forensic Verdict** | Disconnected | False Affirmation | False Affirmation | **REFUTED (Positive Defense Block)** |
+| **Forensic Verdict** | Disconnected | False Affirmation | False Affirmation | **REFUTED (Conduit Blocked at Level 3.5 DMZ)** |
 | **Refutation Rate** | N/A (No synthesis) | 0/1 (Speculates) | 0/1 (Traverses) | **1/1 (100.0% Fail-Closed)** |
-| **False Positive Breach Claims** | N/A | High (Synthesizes compromise) | High (Affirms operational link) | **0/1 (0.0% Zero Hallucination)** |
+| **False Positive Breach Claims** | N/A | High (Synthesizes compromise) | High (Affirms operational link) | **0/1 (0.0% False Positive Breach Claims)** |
 
 ### Part 3: LLM vs Deterministic Rule-Stub Ablation (Isolating Model Contribution)
 
@@ -220,7 +223,7 @@ To maintain engineering integrity, the following limitations are explicitly ackn
 
 1. **Synthetic Proof-of-Concept Scenarios (Shared Authorship):** Both the positive intrusion scenario (`purdue_ot_incident`) and the negative control ablation (`purdue_ot_incident_halted_dmz`) were authored by the project maintainer. While they faithfully model real-world Purdue architectures (PERA / ISA-95) and realistic log formats (Sysmon, Zeek, Rockwell CIP), independent validation on third-party authored testbeds is required to prove generalized traversal.
 2. **Absence of Real-World Log Noise & Entity Resolution:** The Project Aegis testbed uses clean, canonical identifiers (`corp-ws-019`, `plc-ballast-01`). Real-world industrial environments exhibit high background noise, DHCP IP reassignment, multi-homed dual-NIC assets, and hostname variations that require probabilistic entity resolution before graph construction.
-3. **No Live Industrial Telemetry:** In accordance with Australian critical infrastructure protections (Security of Critical Infrastructure Act 2018) and strict industrial NDAs, live operational logs from operating mines, ports, or LNG refineries cannot be publicly distributed. High-fidelity synthetic logs are used in line with industry research standards.
+3. **No Live Industrial Telemetry:** In accordance with commercial confidentiality, non-disclosure agreements (NDAs), and sensitive asset protection across Western Australian resources and energy operators, live operational logs from operating mines, ports, or LNG facilities cannot be publicly distributed. High-fidelity synthetic logs modeled on Purdue Enterprise Reference Architecture (PERA / ISA-95) specifications are used in line with industry research standards.
 4. **Scope of the LLM vs Deterministic Verifier:** The LLM does not establish forensic ground truth. As proven in the Part 3 ablation, ground truth verdicts (`SUPPORTED`, `REFUTED`, `INSUFFICIENT EVIDENCE`) are governed by deterministic graph traversal and set-membership verification. The LLM serves solely as a flexible natural-language interface and narrative synthesizer.
 5. **Disk Snapshot Integrity vs Upstream Log Authenticity:** The SHA-256 byte digests guarantee post-acquisition file integrity (tamper detection once files are acquired on disk). They do not prove that an upstream Windows kernel or logging daemon was not tampered with prior to log generation.
 
@@ -280,8 +283,8 @@ graph-memory-agent/
 │       ├── level1_plc/            # Level 1 Routine CIP tag polling (0x4C_READ_TAG, unmodified logic)
 │       └── level0_process/        # Level 0 Nominal sensors and ARMED_AND_ACTIVE safety interlocks
 ├── tests/
-│   └── test_components.py # 62 offline unit tests (adapters, zero-fallback targets, negative ablation, reports)
-├── benchmark.py           # 2-part comparative evaluation suite (Positive multi-stage + Negative DMZ ablation)
+│   └── test_components.py # 70 offline unit tests (adapters, clause-level target assertion, multi-edge routing, negative ablation, reports)
+├── benchmark.py           # 3-part comparative evaluation suite (Positive multi-stage + Negative DMZ ablation + Deterministic Stub)
 ├── run_agent.py           # CLI entry point (supports --file, --case, and --report)
 └── README.md
 ```
@@ -307,6 +310,8 @@ graph-memory-agent/
 * [x] **v0.5.3 Immutable Target Binding & Empirical Benchmark Metrics:** Strict immutable target binding (preventing answer claims from overriding expected target controller/actuator), all-predicate enforcement (`all()` set difference logic), dedicated Zeek TSV fixtures (`conn.log`, `dns.log`, `notice.log`) with `#separator`, `#types`, and escaped value handling, dynamic benchmark metric calculations, and 59 passing offline unit tests
 * [x] **v0.5.4 Air-Gapped ICS Positioning & Manifest Targets:** Calibrated DFIR/OT problem framing around air-gapped triage without SaaS dependencies, schema-driven manifest target declarations in `case_manifest.json`, and dynamic benchmark reporting
 * [x] **v0.5.5 Verified Academic Bibliography, Zero-Fallback Target Binding & Negative Control Ablation:** Fully verified and audited academic references (EMNLP 2024 GraphReader, arXiv:2508.20643 CyberSleuth, arXiv:2510.01409 OntoLogX, Black Hat USA 2025 Timesketch AI Agent, MITRE ATT&CK for ICS v20.0); eliminated all hardcoded target fallbacks in favor of strict query and manifest binding; added negative-control ablation scenario (`examples/purdue_ot_incident_halted_dmz`) proving 100% deterministic refusal on halted DMZ intrusions; and 62 passing offline unit tests
+* [x] **v0.5.6 Blocked DMZ Traversal, Stricter Multi-Controller Validation, and Zeek Parsing Hardening:** Enforced blocked-edge termination in graph traversal, strict per-controller validation, custom Zeek set separator support, and 66 passing offline unit tests
+* [x] **v0.5.7 Clause-Level Assertion Isolation, Target-Correlated Refutation, and Multi-Edge Semantics:** Implemented clause-level target assertion parsing isolating co-occurring affirmations and negations; calibrated 3-verdict refutation strictly bound to the investigated breach path; added multi-edge connection recovery overriding prior blocked attempts; fixed Zeek delimiter unescaping order; dynamic benchmark metrics; and 70 passing offline unit tests
 * [ ] **Automated ATT&CK Mapping:** Direct lookup mapping of observed edges to MITRE ATT&CK for ICS v20.0 technique IDs.
 
 ---

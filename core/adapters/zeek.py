@@ -117,7 +117,9 @@ class ZeekAdapter(BaseLogAdapter):
                     elif field_type == "bool":
                         record[field_name] = unescaped_val.lower() in ("t", "true", "1")
                     elif field_type.startswith("set") or field_type.startswith("vector"):
-                        items = [cls.unescape_zeek_string(v.strip()) for v in unescaped_val.split(set_separator) if v.strip()]
+                        # Split by declared set separator first, then unescape each element
+                        # Prevents an escaped literal separator (e.g. \x2c) from acting as a collection delimiter
+                        items = [cls.unescape_zeek_string(v.strip()) for v in val.split(set_separator) if v.strip()]
                         record[field_name] = items
                     else:
                         # 2. Heuristic fallback when #types is omitted

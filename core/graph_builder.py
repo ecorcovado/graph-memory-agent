@@ -243,19 +243,34 @@ class KnowledgeGraph:
     def is_transition_blocked(self, source: str, target: str) -> bool:
         """
         Determines whether the transition from source to target was actively blocked by boundary defenses.
-        Returns True if any edge from source to target is marked blocked or represents a blocked connection.
+        Returns True if a blocked edge exists AND no separate allowed connection exists between source and target.
+        If an allowed connection exists (e.g. lateral movement succeeded despite an earlier blocked attempt),
+        the transition is NOT blocked.
         """
         if not self.graph.has_edge(source, target):
             return False
         edges = self.graph.get_edge_data(source, target) or {}
+
+        has_blocked = False
+        has_allowed = False
+
         for attr in edges.values():
-            if attr.get("is_blocked", False) or attr.get("relation") in [
-                "blocked_connection_to", "connection_denied", "access_denied", "process_terminated"
-            ]:
-                return True
-            if attr.get("action") in ["BLOCK", "DENY"]:
-                return True
-        return False
+            is_blk = (
+                attr.get("is_blocked", False)
+                or attr.get("relation") in ["blocked_connection_to", "connection_denied", "access_denied", "process_terminated"]
+                or attr.get("action") in ["BLOCK", "DENY"]
+            )
+            if is_blk:
+                has_blocked = True
+            else:
+                # Any non-blocked directional connectivity or operational event represents an allowed transition
+                if attr.get("relation") in [
+                    "connected_to", "communicated_with", "authenticated_to", "executed", "modified_logic",
+                    "sent_command", "logged_into", "downloaded", "established_beacon"
+                ]:
+                    has_allowed = True
+
+        return has_blocked and not has_allowed
 
     def get_traversable_neighbors(self, node: str) -> List[str]:
         """

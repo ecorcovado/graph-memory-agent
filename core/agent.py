@@ -72,6 +72,16 @@ def extract_json_objects(text: str) -> List[dict]:
     return results
 
 
+def get_clause_for_entity(text: str, entity: str) -> str:
+    """Extracts the specific sentence or contrastive clause mentioning an entity."""
+    delimiters = r"[.;\n]|(?:\b(?:however|but|although|while)\b)"
+    clauses = re.split(delimiters, text, flags=re.IGNORECASE)
+    for c in clauses:
+        if entity.lower() in c.lower():
+            return c.strip().lower()
+    return ""
+
+
 class GraphReaderAgent:
     """
     Autonomous agent navigating a directed MultiDiGraph Knowledge Graph
@@ -92,6 +102,7 @@ class GraphReaderAgent:
         self.verbose = verbose
         self.notebook = Notebook(max_tokens=notebook_max_tokens)
         self.execution_log: List[Tuple[str, str]] = []
+        self.visited_nodes: List[str] = []
 
     def _log(self, title: str, text: str):
         self.execution_log.append((title, text))
@@ -203,6 +214,8 @@ class GraphReaderAgent:
         and decides whether to hop to a neighbor or terminate.
         """
         visited = visited_nodes or set()
+        if current_node not in self.visited_nodes:
+            self.visited_nodes.append(current_node)
 
         # 1. Fetch atomic facts for this node
         fact_ids = self.kg.node_to_facts.get(current_node, [])
@@ -418,22 +431,38 @@ class GraphReaderAgent:
                 present_predicates = {f.relation for f in notebook_facts if f}
                 missing_predicates = requirements.required_predicates - present_predicates
                 if missing_predicates:
-                    # Forensic Distinction: Check for positive evidence that the intrusion was actively blocked
-                    blocked_facts = [
-                        f for f in notebook_facts
-                        if f and (
+                    # Target-Correlated Refutation: A blocked fact must be directly on the investigated breach path
+                    # (its subject was an explored compromised entity, and its target was a downstream asset toward the OT zone)
+                    relevant_blocked_facts = []
+                    for f in notebook_facts:
+                        if not f:
+                            continue
+                        is_blk = (
                             f.relation in ["blocked_connection_to", "connection_denied", "access_denied", "process_terminated"]
                             or f.attributes.get("action") in ["BLOCK", "DENY"]
                             or "block" in str(f.attributes.get("rule_id", "")).lower()
                         )
-                    ]
-                    if blocked_facts:
-                        bf = blocked_facts[0]
+                        if is_blk:
+                            # Verify that this blocked event involves an explored host on the breach path
+                            # and that no separate allowed transition bypassed the block
+                            is_on_breach_path = (f.subject in self.visited_nodes) if self.visited_nodes else True
+                            has_allowed = any(
+                                af and af.subject == f.subject and af.object_entity == f.object_entity
+                                and af.relation in ["connected_to", "communicated_with", "authenticated_to"]
+                                and af.attributes.get("action") not in ["BLOCK", "DENY"]
+                                for af in notebook_facts
+                            )
+                            if is_on_breach_path and not has_allowed:
+                                relevant_blocked_facts.append(f)
+
+                    if relevant_blocked_facts:
+                        bf = relevant_blocked_facts[0]
+                        rule_id = bf.attributes.get("rule_id") or "SECURITY_RULE"
                         self._log("DEFENSE EVIDENCE ENFORCED", f"Adversary path actively blocked: {bf.text}")
                         return (
-                            f"REFUTED: Positive telemetry verifies adversary lateral movement was blocked "
-                            f"({bf.subject} {bf.relation} {bf.object_entity} [{bf.fact_id}]). "
-                            f"Adversary did not compromise target controller or process assets."
+                            f"REFUTED: Positive telemetry confirms adversary lateral movement from '{bf.subject}' to '{bf.object_entity}' "
+                            f"was blocked by security boundary rule '{rule_id}' [{bf.fact_id}]. "
+                            f"Conduit to target OT assets was not established along this path."
                         )
 
                     self._log("EVIDENCE POLICY ENFORCED", f"Missing required predicate(s): {missing_predicates}")
@@ -567,27 +596,22 @@ class GraphReaderAgent:
         # B. Plaintext Claim Validation (prevents verification bypass on unstructured text)
         ans_lower = answer.lower()
 
-        # Check for affirmative assertions of PLC / controller logic modification
-        # An affirmative assertion claims compromise/modification/download, excluding explicit negative statements
-        has_plc_keywords = ("plc" in ans_lower or "controller" in ans_lower) and any(w in ans_lower for w in ["modif", "download", "logic", "compromis", "injected"])
-        is_negative_context = any(neg in ans_lower for neg in [
-            "did not compromise", "no logic modification", "did not reach plc", "not reach the plc",
-            "prevented from modifying", "without modifying", "unmodified"
-        ])
+        # Extract all specific controllers mentioned in the answer
+        claimed_ctrls = set(re.findall(r"plc-[\w-]+", ans_lower))
 
-        if has_plc_keywords and not is_negative_context:
-            claimed_ctrls = set(re.findall(r"plc-[\w-]+", ans_lower))
-            if not claimed_ctrls and not expected_target_ctrl:
-                self._log("CLAIM VALIDATION FAILED", "Answer asserts controller modification, but no target controller was specified in query or case manifest.")
-                return (
-                    "INSUFFICIENT EVIDENCE: Answer asserts controller logic modification, but no target controller "
-                    "was defined in query or case manifest."
-                )
-
-            # Independent Per-Claim Target Binding: EVERY claimed controller must be independently substantiated!
-            # A valid fact for plc-ballast-01 CANNOT substantiate an additional unsupported claim for plc-other-01!
-            if claimed_ctrls:
-                for ctrl in sorted(list(claimed_ctrls)):
+        # Check each claimed controller at the individual clause level
+        # Evaluates each assertion in its own context, preventing global negations elsewhere from suppressing validation
+        if claimed_ctrls:
+            for ctrl in sorted(list(claimed_ctrls)):
+                clause = get_clause_for_entity(answer, ctrl)
+                clause_asserts_mod = any(w in clause for w in ["modif", "download", "logic", "compromis", "injected", "tamper", "overwrote", "flashed"])
+                clause_is_neg = any(neg in clause for neg in [
+                    "no logic modification", "did not modify", "not modified", "unmodified",
+                    "did not compromise", "not compromised", "no modification", "prevented",
+                    "did not reach", "not reach", "was not modified", "were not modified"
+                ])
+                if clause_asserts_mod and not clause_is_neg:
+                    # Affirmative claim of logic modification on this specific controller
                     valid_ctrl_facts = [
                         f for f in all_cited_facts
                         if f and f.relation == "modified_logic"
@@ -601,30 +625,61 @@ class GraphReaderAgent:
                             f"but cited facts do not verify required predicate 'modified_logic' from CONTROLLER_AUDIT on '{ctrl}'."
                         )
 
-            # Furthermore, if an expected target controller was required, it must be substantiated
+            # Enforce that if an expected target controller was required, it must be substantiated if affirmative claims are made
             if expected_target_ctrl and expected_target_ctrl not in claimed_ctrls:
-                self._log("CLAIM VALIDATION FAILED", f"Answer did not substantiate expected target controller '{expected_target_ctrl}'.")
-                return (
-                    f"INSUFFICIENT EVIDENCE: Generated answer claims modification on non-target controller(s) "
-                    f"{sorted(list(claimed_ctrls))}, which does not substantiate expected target '{expected_target_ctrl}'."
+                has_affirmative_ctrl = any(
+                    any(w in get_clause_for_entity(answer, c) for w in ["modif", "download", "logic", "compromis"])
+                    and not any(neg in get_clause_for_entity(answer, c) for neg in ["no ", "did not", "not ", "unmodified", "prevented"])
+                    for c in claimed_ctrls
                 )
+                if has_affirmative_ctrl:
+                    self._log("CLAIM VALIDATION FAILED", f"Answer did not substantiate expected target controller '{expected_target_ctrl}'.")
+                    return (
+                        f"INSUFFICIENT EVIDENCE: Generated answer claims modification on non-target controller(s) "
+                        f"{sorted(list(claimed_ctrls))}, which does not substantiate expected target '{expected_target_ctrl}'."
+                    )
 
-        # Check for affirmative assertions of safety interlock suppression / bypass
-        has_interlock_keywords = "interlock" in ans_lower and any(w in ans_lower for w in ["bypass", "suppress", "inhibit", "override", "disarm"])
-        is_interlock_negative = any(neg in ans_lower for neg in ["not bypassed", "no interlock was bypassed", "armed and active", "armed_and_active"])
+        # General assertion of controller modification without named PLC (e.g. "modified the controller")
+        elif ("plc" in ans_lower or "controller" in ans_lower) and any(w in ans_lower for w in ["modif", "download", "logic", "compromis"]):
+            ctrl_clauses = [
+                c.strip().lower() for c in re.split(r"[.;\n]|(?:\b(?:however|but|although|while)\b)", answer, flags=re.IGNORECASE)
+                if ("plc" in c.lower() or "controller" in c.lower()) and any(w in c.lower() for w in ["modif", "download", "logic", "compromis"])
+            ]
+            aff_clauses = [
+                c for c in ctrl_clauses
+                if not any(neg in c for neg in ["no ", "did not", "not ", "never", "unmodified", "prevented", "refuted"])
+            ]
+            if aff_clauses:
+                if not expected_target_ctrl:
+                    self._log("CLAIM VALIDATION FAILED", "Answer asserts controller modification, but no target controller was specified in query or case manifest.")
+                    return (
+                        "INSUFFICIENT EVIDENCE: Answer asserts controller logic modification, but no target controller "
+                        "was defined in query or case manifest."
+                    )
+                valid_plc_facts = [
+                    f for f in all_cited_facts
+                    if f and f.relation == "modified_logic"
+                    and f.source_type == "CONTROLLER_AUDIT"
+                    and f.object_entity == expected_target_ctrl
+                ]
+                if not valid_plc_facts:
+                    self._log("CLAIM VALIDATION FAILED", f"Assertion of PLC logic modification lacks verified fact on target controller '{expected_target_ctrl}'.")
+                    return (
+                        f"INSUFFICIENT EVIDENCE: Generated answer asserts controller logic modification, but cited facts "
+                        f"do not verify required predicate 'modified_logic' from CONTROLLER_AUDIT on expected target '{expected_target_ctrl}'."
+                    )
 
-        if has_interlock_keywords and not is_interlock_negative:
-            claimed_tags = set(re.findall(r"[a-z]{2}-\d{4}", ans_lower))
-            if not claimed_tags and not expected_target_act:
-                self._log("CLAIM VALIDATION FAILED", "Answer asserts interlock bypass, but no target actuator was specified in query or case manifest.")
-                return (
-                    "INSUFFICIENT EVIDENCE: Answer asserts safety interlock bypass, but no target actuator "
-                    "was defined in query or case manifest."
-                )
-
-            # Independent Per-Claim Tag Binding: EVERY claimed tag must have verified suppressed interlock telemetry!
-            if claimed_tags:
-                for tag in sorted(list(claimed_tags)):
+        # Check each claimed actuator tag at the individual clause level
+        claimed_tags = set(re.findall(r"[a-z]{2}-\d{4}", ans_lower))
+        if claimed_tags:
+            for tag in sorted(list(claimed_tags)):
+                clause = get_clause_for_entity(answer, tag)
+                clause_asserts_bypass = any(w in clause for w in ["bypass", "suppress", "inhibit", "overrid", "disarm", "disabl"])
+                clause_is_neg = any(neg in clause for neg in [
+                    "not bypassed", "no interlock was bypassed", "armed and active", "armed_and_active",
+                    "remained active", "was not bypassed", "were not bypassed", "not suppressed"
+                ])
+                if clause_asserts_bypass and not clause_is_neg:
                     valid_tag_facts = []
                     for f in all_cited_facts:
                         if not f:
@@ -642,8 +697,19 @@ class GraphReaderAgent:
                             f"but cited facts do not verify suppressed/bypassed interlock telemetry on '{tag}'."
                         )
 
+            # Enforce that if expected actuator was required, it must be substantiated if affirmative interlock claims are made
             if expected_target_act and expected_target_act not in claimed_tags:
-                self._log("CLAIM VALIDATION FAILED", f"Answer claims bypass on '{claimed_tags}', which does not substantiate expected actuator '{expected_target_act}'.")
+                has_affirmative_act = any(
+                    any(w in get_clause_for_entity(answer, t) for w in ["bypass", "suppress", "inhibit", "override"])
+                    and not any(neg in get_clause_for_entity(answer, t) for neg in ["not bypassed", "armed", "remained active"])
+                    for t in claimed_tags
+                )
+                if has_affirmative_act:
+                    self._log("CLAIM VALIDATION FAILED", f"Answer claims bypass on '{claimed_tags}', which does not substantiate expected actuator '{expected_target_act}'.")
+                    return (
+                        f"INSUFFICIENT EVIDENCE: Generated answer claims bypass on non-target tag(s) "
+                        f"{sorted(list(claimed_tags))}, which does not substantiate expected target '{expected_target_act}'."
+                    )
                 return (
                     f"INSUFFICIENT EVIDENCE: Generated answer claims bypass on non-target tag(s) "
                     f"{sorted(list(claimed_tags))}, which does not substantiate expected target '{expected_target_act}'."

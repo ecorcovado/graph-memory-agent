@@ -1718,6 +1718,184 @@ class TestGraphMemoryAgent(unittest.TestCase):
         )
         self.assertEqual(rec["tags"], ["alpha", "beta", "gamma"])
 
+    def test_clause_level_assertion_validation_with_mixed_negation_and_affirmation(self):
+        """v0.5.7: Clause-level assertion validation: negative assertion on one entity does not suppress validation of another."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        cip_facts = [f for f in kg.atomic_facts.values() if f.relation == "modified_logic"]
+        sysmon_facts = [f for f in kg.atomic_facts.values() if f.relation == "executed"]
+        valve_facts = [f for f in kg.atomic_facts.values() if f.relation == "interlock_status"]
+        self.assertTrue(len(cip_facts) > 0 and len(sysmon_facts) > 0 and len(valve_facts) > 0)
+        cip_fid = cip_facts[0].fact_id
+        sys_fid = sysmon_facts[0].fact_id
+        valve_fid = valve_facts[0].fact_id
+
+        # 1. Affirmative claim on ballast combined with negative claim on other -> MUST FAIL if ballast cites wrong fact
+        ans_invalid = (
+            f"No logic modification was observed on PLC-OTHER-01. "
+            f"However, the attacker downloaded modified logic to PLC-BALLAST-01 [{sys_fid}]."
+        )
+        client_inv = MockOllamaClient(responses={"Target Question": ans_invalid})
+        agent_inv = GraphReaderAgent(client_inv, kg)
+        agent_inv.notebook.add_note(step=1, source_node="eng-ws-02", content="Facts gathered", fact_ids=[cip_fid, sys_fid])
+        res_inv = agent_inv.synthesize_answer("Did the enterprise compromise reach the PLC?")
+        self.assertIn("INSUFFICIENT EVIDENCE", res_inv)
+        self.assertIn("plc-ballast-01", res_inv)
+
+        # 2. Affirmative claim on ballast with valid fact -> MUST SUCCEED
+        ans_valid = (
+            f"No logic modification was observed on PLC-OTHER-01. "
+            f"However, the attacker downloaded modified logic to PLC-BALLAST-01 [{cip_fid}]."
+        )
+        client_val = MockOllamaClient(responses={"Target Question": ans_valid})
+        agent_val = GraphReaderAgent(client_val, kg)
+        agent_val.notebook.add_note(step=1, source_node="eng-ws-02", content="Modified logic", fact_ids=[cip_fid])
+        res_val = agent_val.synthesize_answer("Did the enterprise compromise reach the PLC?")
+        self.assertIn("PLC-BALLAST-01", res_val)
+        self.assertNotIn("INSUFFICIENT EVIDENCE", res_val)
+
+        # 3. Interlock validation: negative on XV-0001 must not suppress validation of affirmative on XV-4012
+        ans_interlock_inv = (
+            f"XV-0001 was not bypassed, but XV-4012 had its safety interlock overridden [{sys_fid}]."
+        )
+        client_int = MockOllamaClient(responses={"Target Question": ans_interlock_inv})
+        agent_int = GraphReaderAgent(client_int, kg)
+        agent_int.notebook.add_note(step=1, source_node="obs-valve", content="Telemetry", fact_ids=[valve_fid, sys_fid])
+        res_int = agent_int.synthesize_answer("What safety interlock was bypassed?")
+        self.assertIn("INSUFFICIENT EVIDENCE", res_int)
+        self.assertIn("xv-4012", res_int)
+
+    def test_unrelated_blocked_connection_does_not_trigger_refuted(self):
+        """v0.5.7: An unrelated firewall block from an unvisited host does not trigger REFUTED for the breach path."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        case_dir = os.path.join(base_dir, "examples", "purdue_ot_incident")
+        loader = CaseLoader(case_dir)
+        kg = loader.load_case()
+
+        # Add an unrelated blocked fact from an external workstation to the notebook
+        unrelated_fid = "deadbeef12345678deadbeef12345678_R9_unrelated_block"
+        kg.source_hashes["deadbeef12345678deadbeef12345678"] = "deadbeef" * 8
+        kg.atomic_facts[unrelated_fid] = AtomicFact(
+            fact_id=unrelated_fid,
+            chunk_id=9,
+            text="PERA-FW01 blocked connection from workstation-999 to 192.168.1.1",
+            source_id="deadbeef12345678deadbeef12345678",
+            source_record_id="unrelated_block_1",
+            subject="workstation-999",
+            relation="blocked_connection_to",
+            object_entity="192.168.1.1",
+            source_type="FIREWALL_LOG",
+            evidence_basis="DIRECT_TELEMETRY",
+            attributes={"action": "BLOCK", "rule_id": "DEFAULT-DENY-EXTERNAL"}
+        )
+
+        client = MockOllamaClient()
+        agent = GraphReaderAgent(client, kg)
+        # Agent explored corp-ws-019, NOT workstation-999
+        agent.visited_nodes = ["corp-ws-019"]
+        agent.notebook.add_note(step=1, source_node="workstation-999", content="Unrelated blocked flow", fact_ids=[unrelated_fid])
+
+        # Synthesize answer for PLC question where modified_logic is missing
+        ans = agent.synthesize_answer("Did the enterprise compromise reach the PLC?")
+        # Because workstation-999 is NOT on the investigated breach path, it must NOT return REFUTED
+        self.assertNotIn("REFUTED", ans)
+        self.assertIn("INSUFFICIENT EVIDENCE", ans)
+        self.assertIn("modified_logic", ans)
+
+    def test_multi_edge_allowed_connection_overrides_prior_blocked_attempt(self):
+        """v0.5.7: A subsequent allowed connection between two entities overrides an earlier blocked attempt."""
+        from core.graph_builder import KnowledgeGraph
+        import networkx as nx
+
+        kg = KnowledgeGraph()
+        kg.graph = nx.MultiDiGraph()
+        kg.graph.add_node("dmz-hist-mirror")
+        kg.graph.add_node("scada-ignition-gw01")
+
+        # Edge 1 (10:00): Blocked connection attempt
+        kg.graph.add_edge(
+            "dmz-hist-mirror",
+            "scada-ignition-gw01",
+            relation="blocked_connection_to",
+            is_blocked=True,
+            action="BLOCK",
+            timestamp="2026-10-28T10:00:00Z"
+        )
+        # With only the blocked edge, transition is blocked
+        self.assertTrue(kg.is_transition_blocked("dmz-hist-mirror", "scada-ignition-gw01"))
+
+        # Edge 2 (10:05): Successful allowed connection on port 8043
+        kg.graph.add_edge(
+            "dmz-hist-mirror",
+            "scada-ignition-gw01",
+            relation="connected_to",
+            is_blocked=False,
+            action="ALLOW",
+            timestamp="2026-10-28T10:05:00Z"
+        )
+        # With the allowed connection present, the transition is NOT blocked
+        self.assertFalse(kg.is_transition_blocked("dmz-hist-mirror", "scada-ignition-gw01"))
+        self.assertIn("scada-ignition-gw01", kg.get_traversable_neighbors("dmz-hist-mirror"))
+
+    def test_zeek_escaped_set_separator_inside_element_and_caseloader_ingestion(self):
+        """v0.5.7: Zeek TSV parser splits by raw delimiter before unescaping elements, respecting embedded escaped delimiters."""
+        from core.adapters.zeek import ZeekAdapter
+        import tempfile, shutil
+
+        # 1. Adapter level test: element contains escaped comma \\x2c
+        fields = ["ts", "tags"]
+        types = ["time", "vector[string]"]
+        line = "1730112310.12\talpha\\x2cbeta,gamma"
+        rec = ZeekAdapter.parse_tsv_line(
+            fields=fields,
+            line_str=line,
+            types=types,
+            separator="\t",
+            set_separator=",",
+        )
+        # Must yield exactly 2 elements: 'alpha,beta' and 'gamma', NOT 3
+        self.assertEqual(len(rec["tags"]), 2)
+        self.assertEqual(rec["tags"][0], "alpha,beta")
+        self.assertEqual(rec["tags"][1], "gamma")
+
+        # 2. End-to-end CaseLoader ingestion test with custom #set_separator
+        temp_dir = tempfile.mkdtemp()
+        try:
+            tsv_content = (
+                "#separator \\x09\n"
+                "#set_separator\t;\n"
+                "#empty_field\t(empty)\n"
+                "#unset_field\t-\n"
+                "#path\tdns\n"
+                "#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\tquery\tanswers\n"
+                "#types\ttime\tstring\taddr\tport\taddr\tport\tstring\tstring\tvector[string]\n"
+                "1730112310.12\tC999\t10.10.4.19\t53123\t10.10.30.1\t53\tudp\thost.local\t10.10.30.15;10.10.30.16\n"
+            )
+            os.makedirs(os.path.join(temp_dir, "logs"), exist_ok=True)
+            with open(os.path.join(temp_dir, "logs", "dns.log"), "w", encoding="utf-8") as f:
+                f.write(tsv_content)
+
+            manifest = {
+                "case_id": "TEST-ZEEK-CUSTOM-SET",
+                "title": "Custom Set Separator Test",
+                "evidence_sources": {
+                    "network_dns": ["logs/dns.log"]
+                }
+            }
+            with open(os.path.join(temp_dir, "case_manifest.json"), "w", encoding="utf-8") as f:
+                json.dump(manifest, f)
+
+            loader = CaseLoader(temp_dir)
+            kg = loader.load_case()
+            dns_facts = [f for f in kg.atomic_facts.values() if f.source_type == "ZEEK_DNS"]
+            self.assertEqual(len(dns_facts), 1)
+            self.assertEqual(dns_facts[0].attributes.get("answers"), ["10.10.30.15", "10.10.30.16"])
+        finally:
+            shutil.rmtree(temp_dir)
+
 
 if __name__ == "__main__":
     unittest.main()
